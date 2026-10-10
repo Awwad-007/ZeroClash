@@ -1,52 +1,161 @@
-import React, { useEffect, useState } from 'react';
-import { X, Calendar, CheckCircle2, AlertTriangle, Clock, ShieldCheck, Zap } from 'lucide-react';
+import React, { useEffect, useState, useMemo } from 'react';
+import {
+  X,
+  Calendar,
+  CheckCircle2,
+  AlertTriangle,
+  Clock,
+  ShieldCheck,
+  Zap,
+  ArrowRight,
+  ChevronDown,
+  Sparkles,
+  Info,
+} from 'lucide-react';
 import { useCampusStore } from '../store/campusStore';
-import { MOCK_EQUIPMENT } from '../data/mock';
+import { checkAvailability, TimeSlot } from '../engine/conflict';
+import { calculatePriorityScore } from '../engine/waitlist';
 
 export const EquipmentModal: React.FC = () => {
   const isModalOpen = useCampusStore((s) => s.isModalOpen);
   const selectedUnitId = useCampusStore((s) => s.selectedUnitId);
+  const equipment = useCampusStore((s) => s.equipment);
   const closeModal = useCampusStore((s) => s.closeModal);
+  const bookings = useCampusStore((s) => s.bookings);
+  const maintenance = useCampusStore((s) => s.maintenance);
+  const currentUser = useCampusStore((s) => s.currentUser);
+  const createBooking = useCampusStore((s) => s.createBooking);
+  const joinWaitlist = useCampusStore((s) => s.joinWaitlist);
 
-  const [bookingSuccess, setBookingSuccess] = useState<string | null>(null);
-  const [waitlistSuccess, setWaitlistSuccess] = useState<string | null>(null);
+  // Booking slide-in panel state
+  const [isBookingOpen, setIsBookingOpen] = useState(false);
+  const [selectedDayOffset, setSelectedDayOffset] = useState<number>(0);
+  const [startHourStr, setStartHourStr] = useState<string>('12:00');
+  const [endHourStr, setEndHourStr] = useState<string>('14:00');
+  const [purpose, setPurpose] = useState<string>('Senior Capstone Project Evaluation');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Waitlist urgency modal state
+  const [isWaitlistPromptOpen, setIsWaitlistPromptOpen] = useState(false);
+  const [waitlistUrgency, setWaitlistUrgency] = useState<'low' | 'medium' | 'high'>('high');
+
+  // Reset booking panel when selected unit changes
+  useEffect(() => {
+    setIsBookingOpen(false);
+    setIsWaitlistPromptOpen(false);
+  }, [selectedUnitId]);
 
   // Close on Esc key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        closeModal();
+        if (isBookingOpen) {
+          setIsBookingOpen(false);
+        } else {
+          closeModal();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [closeModal]);
+  }, [isBookingOpen, closeModal]);
 
-  if (!isModalOpen || !selectedUnitId) return null;
+  const unit = selectedUnitId ? equipment[selectedUnitId] : null;
 
-  const unit = MOCK_EQUIPMENT[selectedUnitId];
-  if (!unit) return null;
+  // Generate 15-minute time options from 08:00 to 22:00
+  const timeOptions = useMemo(() => {
+    const opts: string[] = [];
+    for (let h = 8; h <= 21; h++) {
+      for (const m of [0, 15, 30, 45]) {
+        opts.push(`${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`);
+      }
+    }
+    opts.push('22:00');
+    return opts;
+  }, []);
 
-  const handleBookSlot = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (unit.status !== 'available') return;
-    setBookingSuccess(`Slot confirmed for ${unit.name} ${unit.unitNumber}! Reserved until next scheduled window.`);
-    setTimeout(() => setBookingSuccess(null), 4000);
+  // Compute selected Start and End Date objects
+  const { reqStart, reqEnd } = useMemo(() => {
+    const s = new Date();
+    s.setDate(s.getDate() + selectedDayOffset);
+    const [sh, sm] = startHourStr.split(':').map(Number);
+    s.setHours(sh, sm, 0, 0);
+
+    const e = new Date();
+    e.setDate(e.getDate() + selectedDayOffset);
+    const [eh, em] = endHourStr.split(':').map(Number);
+    e.setHours(eh, em, 0, 0);
+
+    return { reqStart: s, reqEnd: e };
+  }, [selectedDayOffset, startHourStr, endHourStr]);
+
+  // Run live clash validation
+  const availability = useMemo(() => {
+    if (!unit) return { ok: true, conflictingBookings: [], suggestedAlternativeSlots: [] };
+    return checkAvailability(unit.id, reqStart, reqEnd, bookings, maintenance);
+  }, [unit, reqStart, reqEnd, bookings, maintenance]);
+
+  if (!isModalOpen || !unit) return null;
+
+  const handleConfirmBooking = async () => {
+    if (!availability.ok) return;
+    try {
+      setIsSubmitting(true);
+      await createBooking({
+        unitId: unit.id,
+        startTime: reqStart,
+        endTime: reqEnd,
+        purpose: purpose || 'Academic Research',
+      });
+      setIsBookingOpen(false);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
-  const handleJoinWaitlist = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (unit.status === 'maintenance') return;
-    setWaitlistSuccess(`Added to priority waitlist for ${unit.name} ${unit.unitNumber} (Priority Score: 92/100).`);
-    setTimeout(() => setWaitlistSuccess(null), 4000);
+  const handleConfirmWaitlist = () => {
+    joinWaitlist({
+      unitId: unit.id,
+      startTime: reqStart,
+      endTime: reqEnd,
+      urgency: waitlistUrgency,
+      purpose: purpose || 'Academic Research',
+    });
+    setIsBookingOpen(false);
+    setIsWaitlistPromptOpen(false);
   };
+
+  const handleSelectAlternativeSlot = (slot: TimeSlot) => {
+    // Determine day offset
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const targetDay = new Date(slot.start);
+    targetDay.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((targetDay.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+
+    setSelectedDayOffset(Math.max(0, diffDays));
+    const sH = slot.start.getHours().toString().padStart(2, '0');
+    const sM = slot.start.getMinutes().toString().padStart(2, '0');
+    const eH = slot.end.getHours().toString().padStart(2, '0');
+    const eM = slot.end.getMinutes().toString().padStart(2, '0');
+    setStartHourStr(`${sH}:${sM}`);
+    setEndHourStr(`${eH}:${eM}`);
+  };
+
+  const priorityPreview = calculatePriorityScore(
+    currentUser.role,
+    waitlistUrgency,
+    currentUser.noShowCount
+  );
 
   return (
     <div
-      className="absolute top-24 right-6 md:right-16 z-50 w-80 md:w-96 select-none pointer-events-auto transition-all duration-300 animate-in fade-in zoom-in-95"
+      className="absolute top-24 right-6 md:right-16 z-50 w-84 md:w-[410px] select-none pointer-events-auto transition-all duration-300 animate-in fade-in zoom-in-95"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="glass-panel-highlight rounded-xl p-5 border border-cyan-500/40 shadow-[0_12px_40px_rgba(0,0,0,0.6)] backdrop-blur-xl">
+      <div className="glass-panel-highlight rounded-xl p-5 border border-cyan-500/40 shadow-[0_16px_50px_rgba(0,0,0,0.7)] backdrop-blur-xl">
         {/* Top Header Row */}
         <div className="flex items-center justify-between pb-2 mb-3 border-b border-cyan-500/15">
           <span className="text-xs font-mono text-slate-400 tracking-wider">
@@ -64,25 +173,19 @@ export const EquipmentModal: React.FC = () => {
 
         {/* Equipment Title & Unit ID */}
         <div className="flex items-center space-x-3 mb-3">
-          <div className="w-9 h-9 rounded-lg bg-cyan-950/70 border border-cyan-500/30 flex items-center justify-center overflow-hidden shrink-0">
-            <img
-              src={unit.iconUrl}
-              alt={unit.name}
-              className="w-8 h-8 object-contain"
-            />
+          <div className="w-10 h-10 rounded-lg bg-cyan-950/70 border border-cyan-500/30 flex items-center justify-center overflow-hidden shrink-0">
+            <img src={unit.iconUrl} alt={unit.name} className="w-8 h-8 object-contain" />
           </div>
-          <div>
+          <div className="flex-1">
             <h2 className="text-base font-semibold text-white tracking-wide flex items-center space-x-1.5">
               <span>{unit.name}</span>
               <span className="text-cyan-400 font-mono text-sm">{unit.unitNumber}</span>
             </h2>
-            <p className="text-[11px] text-slate-400 font-mono line-clamp-1">
-              {unit.specs.model}
-            </p>
+            <p className="text-[11px] text-slate-400 font-mono line-clamp-1">{unit.specs.model}</p>
           </div>
         </div>
 
-        {/* Status Line */}
+        {/* Live Dynamic Status Line */}
         <div className="flex items-center space-x-2 mb-2 text-xs font-medium">
           <span
             className={`w-2.5 h-2.5 rounded-full shrink-0 ${
@@ -108,7 +211,7 @@ export const EquipmentModal: React.FC = () => {
 
         {/* Next Booking Info */}
         {unit.nextBooking && (
-          <div className="flex items-center space-x-1.5 text-xs text-slate-300/90 mb-4 font-sans bg-slate-900/40 px-2.5 py-1.5 rounded border border-slate-700/30">
+          <div className="flex items-center space-x-1.5 text-xs text-slate-300/90 mb-3 font-sans bg-slate-900/40 px-2.5 py-1.5 rounded border border-slate-700/30">
             <Clock className="w-3.5 h-3.5 text-slate-400 shrink-0" />
             <span>
               Next booking: <strong className="text-slate-100 font-medium">{unit.nextBooking.startTime} - {unit.nextBooking.endTime}</strong> ({unit.nextBooking.userName})
@@ -118,7 +221,7 @@ export const EquipmentModal: React.FC = () => {
 
         {/* Current Active Booking Details if Booked */}
         {unit.currentBooking && (
-          <div className="flex items-center space-x-1.5 text-xs text-slate-300/90 mb-4 font-sans bg-rose-950/20 px-2.5 py-1.5 rounded border border-rose-500/20">
+          <div className="flex items-center space-x-1.5 text-xs text-slate-300/90 mb-3 font-sans bg-rose-950/20 px-2.5 py-1.5 rounded border border-rose-500/20">
             <AlertTriangle className="w-3.5 h-3.5 text-rose-400 shrink-0" />
             <span>
               In use by <strong className="text-rose-200">{unit.currentBooking.userName}</strong> ({unit.currentBooking.userRole})
@@ -126,51 +229,274 @@ export const EquipmentModal: React.FC = () => {
           </div>
         )}
 
-        {/* Action Buttons */}
-        <div className="flex items-center space-x-2 pt-1">
-          {/* Book Slot Button */}
-          <button
-            type="button"
-            onClick={handleBookSlot}
-            disabled={unit.status !== 'available'}
-            className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 flex items-center justify-center space-x-1.5 ${
-              unit.status === 'available'
-                ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(0,240,255,0.4)] active:scale-98 cursor-pointer'
-                : 'bg-slate-800/50 text-slate-500 cursor-not-allowed border border-slate-700/30'
-            }`}
-          >
-            <Calendar className="w-3.5 h-3.5" />
-            <span>Book Slot</span>
-          </button>
+        {/* Main Action Buttons (when booking panel is closed) */}
+        {!isBookingOpen && !isWaitlistPromptOpen && (
+          <div className="flex items-center space-x-2 pt-1">
+            {/* Book Slot Button */}
+            <button
+              type="button"
+              onClick={() => setIsBookingOpen(true)}
+              disabled={unit.status === 'maintenance'}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 flex items-center justify-center space-x-1.5 ${
+                unit.status === 'maintenance'
+                  ? 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-700/30'
+                  : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(0,240,255,0.4)] active:scale-98 cursor-pointer'
+              }`}
+            >
+              <Calendar className="w-3.5 h-3.5" />
+              <span>Book Slot</span>
+            </button>
 
-          {/* Join Waitlist Button */}
-          <button
-            type="button"
-            onClick={handleJoinWaitlist}
-            disabled={unit.status === 'maintenance'}
-            className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 flex items-center justify-center space-x-1.5 ${
-              unit.status === 'maintenance'
-                ? 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-700/30'
-                : 'bg-slate-900/80 hover:bg-slate-800 text-slate-200 border border-cyan-500/30 hover:border-cyan-400/60 active:scale-98 cursor-pointer'
-            }`}
-          >
-            <Zap className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Join Waitlist</span>
-          </button>
-        </div>
-
-        {/* Feedback Notifications */}
-        {bookingSuccess && (
-          <div className="mt-3 p-2.5 rounded bg-emerald-950/60 border border-emerald-500/40 text-[11px] text-emerald-300 flex items-center space-x-1.5 animate-in fade-in">
-            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-            <span>{bookingSuccess}</span>
+            {/* Join Waitlist Button */}
+            <button
+              type="button"
+              onClick={() => setIsWaitlistPromptOpen(true)}
+              disabled={unit.status === 'maintenance'}
+              className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 flex items-center justify-center space-x-1.5 ${
+                unit.status === 'maintenance'
+                  ? 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-700/30'
+                  : 'bg-slate-900/80 hover:bg-slate-800 text-slate-200 border border-cyan-500/30 hover:border-cyan-400/60 active:scale-98 cursor-pointer'
+              }`}
+            >
+              <Zap className="w-3.5 h-3.5 text-cyan-400" />
+              <span>Join Waitlist</span>
+            </button>
           </div>
         )}
 
-        {waitlistSuccess && (
-          <div className="mt-3 p-2.5 rounded bg-cyan-950/60 border border-cyan-500/40 text-[11px] text-cyan-300 flex items-center space-x-1.5 animate-in fade-in">
-            <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
-            <span>{waitlistSuccess}</span>
+        {/* --- COMPACT SLIDE-IN BOOKING PANEL --- */}
+        {isBookingOpen && (
+          <div className="mt-3 pt-3 border-t border-cyan-500/20 text-xs animate-in slide-in-from-top-2 duration-200">
+            <div className="flex items-center justify-between mb-3">
+              <span className="font-mono text-cyan-400 text-[11px] uppercase tracking-wider font-semibold">
+                Configure Reservation
+              </span>
+              <button
+                onClick={() => setIsBookingOpen(false)}
+                className="text-[11px] text-slate-400 hover:text-white underline cursor-pointer"
+              >
+                Back
+              </button>
+            </div>
+
+            {/* Date Selector Chips */}
+            <div className="mb-3">
+              <label className="text-[10px] font-mono text-slate-400 block mb-1">Select Date</label>
+              <div className="flex space-x-1.5 overflow-x-auto pb-1">
+                {[0, 1, 2, 3, 4, 5, 6].map((offset) => {
+                  const d = new Date();
+                  d.setDate(d.getDate() + offset);
+                  const isSelected = selectedDayOffset === offset;
+                  const label = offset === 0 ? 'Today' : offset === 1 ? 'Tmrw' : d.toLocaleDateString([], { weekday: 'short' });
+                  const dateStr = d.toLocaleDateString([], { month: 'numeric', day: 'numeric' });
+
+                  return (
+                    <button
+                      key={offset}
+                      type="button"
+                      onClick={() => setSelectedDayOffset(offset)}
+                      className={`px-2.5 py-1 rounded text-center shrink-0 border transition ${
+                        isSelected
+                          ? 'bg-cyan-500 text-slate-950 font-bold border-cyan-400'
+                          : 'bg-slate-900/80 text-slate-300 border-slate-700/50 hover:border-slate-500'
+                      }`}
+                    >
+                      <div className="text-[10px] leading-tight">{label}</div>
+                      <div className="text-[9px] font-mono opacity-80">{dateStr}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Time Window (15-min increments) */}
+            <div className="grid grid-cols-2 gap-2 mb-3">
+              <div>
+                <label className="text-[10px] font-mono text-slate-400 block mb-1">Start Time (15m)</label>
+                <select
+                  value={startHourStr}
+                  onChange={(e) => setStartHourStr(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:border-cyan-400 outline-none"
+                >
+                  {timeOptions.slice(0, -1).map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-[10px] font-mono text-slate-400 block mb-1">End Time (15m)</label>
+                <select
+                  value={endHourStr}
+                  onChange={(e) => setEndHourStr(e.target.value)}
+                  className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-100 font-mono text-xs focus:border-cyan-400 outline-none"
+                >
+                  {timeOptions.slice(1).map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Purpose Input */}
+            <div className="mb-3">
+              <label className="text-[10px] font-mono text-slate-400 block mb-1">Purpose / Project Title</label>
+              <input
+                type="text"
+                value={purpose}
+                onChange={(e) => setPurpose(e.target.value)}
+                placeholder="e.g. CVPR Model Evaluation"
+                className="w-full bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-slate-100 text-xs focus:border-cyan-400 outline-none"
+              />
+            </div>
+
+            {/* LIVE CONFLICT / AVAILABILITY STATUS */}
+            {!availability.ok ? (
+              <div className="mb-3 p-2.5 rounded-lg bg-rose-950/40 border border-rose-500/40 animate-in fade-in">
+                <div className="flex items-start space-x-1.5 text-rose-300">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                  <div>
+                    <span className="font-semibold text-[11px] block text-rose-200">
+                      Clash Detected ({availability.conflictingBookings.length} conflict)
+                    </span>
+                    <p className="text-[10px] text-rose-300/90 leading-tight mt-0.5">
+                      {availability.reason}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Suggested Alternative Slots as 1-click Chips */}
+                {availability.suggestedAlternativeSlots.length > 0 && (
+                  <div className="mt-2 pt-2 border-t border-rose-500/20">
+                    <span className="text-[10px] font-mono text-slate-300 block mb-1">
+                      Suggested alternative free slots:
+                    </span>
+                    <div className="flex flex-wrap gap-1">
+                      {availability.suggestedAlternativeSlots.map((slot, idx) => {
+                        const dayName =
+                          slot.start.getDate() === new Date().getDate()
+                            ? 'Today'
+                            : slot.start.toLocaleDateString([], { weekday: 'short' });
+                        const sTime = slot.start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        const eTime = slot.end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                        return (
+                          <button
+                            key={idx}
+                            type="button"
+                            onClick={() => handleSelectAlternativeSlot(slot)}
+                            className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-950/80 border border-cyan-500/40 text-cyan-300 hover:bg-cyan-500 hover:text-slate-950 transition cursor-pointer"
+                            title="Click to apply this slot"
+                          >
+                            {dayName} {sTime} - {eTime}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Fallback Action: Join Waitlist for this clashing slot */}
+                <div className="mt-2.5 pt-2 border-t border-rose-500/20 flex justify-between items-center">
+                  <span className="text-[10px] text-slate-300">Slot occupied?</span>
+                  <button
+                    type="button"
+                    onClick={handleConfirmWaitlist}
+                    className="px-2.5 py-1 rounded text-[11px] font-semibold bg-amber-400 hover:bg-amber-300 text-slate-950 transition flex items-center space-x-1"
+                  >
+                    <Zap className="w-3 h-3 text-slate-950" />
+                    <span>Join waitlist for this slot</span>
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="mb-3 p-2 rounded-lg bg-emerald-950/40 border border-emerald-500/40 flex items-center space-x-1.5 text-emerald-300 text-[11px]">
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                <span>Slot available · Zero interval conflicts detected</span>
+              </div>
+            )}
+
+            {/* Confirm Button */}
+            <button
+              type="button"
+              onClick={handleConfirmBooking}
+              disabled={!availability.ok || isSubmitting}
+              className={`w-full py-2 px-3 rounded-lg text-xs font-semibold tracking-wide transition-all duration-200 flex items-center justify-center space-x-1.5 ${
+                availability.ok && !isSubmitting
+                  ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(0,240,255,0.4)] active:scale-98 cursor-pointer'
+                  : 'bg-slate-800/40 text-slate-500 cursor-not-allowed border border-slate-700/30'
+              }`}
+            >
+              <Calendar className="w-3.5 h-3.5" />
+              <span>{isSubmitting ? 'Locking Reservation...' : 'Confirm Reservation'}</span>
+            </button>
+          </div>
+        )}
+
+        {/* --- QUICK WAITLIST PROMPT (Direct Modal Action) --- */}
+        {isWaitlistPromptOpen && (
+          <div className="mt-3 pt-3 border-t border-cyan-500/20 text-xs animate-in slide-in-from-top-2 duration-200">
+            <div className="flex items-center justify-between mb-2">
+              <span className="font-mono text-cyan-400 text-[11px] uppercase tracking-wider font-semibold">
+                Join Priority Waitlist
+              </span>
+              <button
+                onClick={() => setIsWaitlistPromptOpen(false)}
+                className="text-[11px] text-slate-400 hover:text-white underline"
+              >
+                Cancel
+              </button>
+            </div>
+
+            <p className="text-[11px] text-slate-300 mb-2">
+              Waitlist ranking uses role weight, urgency factor, and no-show history.
+            </p>
+
+            <div className="mb-3">
+              <label className="text-[10px] font-mono text-slate-400 block mb-1">Project Urgency</label>
+              <div className="grid grid-cols-3 gap-1.5">
+                {(['low', 'medium', 'high'] as const).map((urg) => (
+                  <button
+                    key={urg}
+                    type="button"
+                    onClick={() => setWaitlistUrgency(urg)}
+                    className={`py-1 rounded text-center text-xs uppercase font-mono border transition ${
+                      waitlistUrgency === urg
+                        ? 'bg-cyan-500 text-slate-950 font-bold border-cyan-400'
+                        : 'bg-slate-900 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {urg}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Score Preview */}
+            <div className="mb-3 p-2 rounded bg-slate-900/80 border border-slate-700/60 flex items-center justify-between">
+              <div>
+                <span className="text-[10px] text-slate-400 block">Computed Priority Score</span>
+                <span className="text-sm font-bold font-mono text-cyan-300">
+                  {priorityPreview.totalScore} / 100
+                </span>
+              </div>
+              <div className="text-[10px] font-mono text-slate-400 text-right">
+                <div>Role: {priorityPreview.roleScore} (40%)</div>
+                <div>Urgency: {priorityPreview.urgencyScore} (40%)</div>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleConfirmWaitlist}
+              className="w-full py-2 px-3 rounded-lg text-xs font-semibold bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_15px_rgba(0,240,255,0.4)] transition cursor-pointer"
+            >
+              Submit Waitlist Entry
+            </button>
           </div>
         )}
       </div>

@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import * as THREE from 'three';
-import { Building, MOCK_EQUIPMENT } from '../data/mock';
+import { Building } from '../types';
 import { useCampusStore } from '../store/campusStore';
 
 interface BuildingMeshProps {
@@ -13,25 +13,29 @@ export const BuildingMesh: React.FC<BuildingMeshProps> = ({ building }) => {
   const matchingBuildingIds = useCampusStore((s) => s.matchingBuildingIds);
   const wireframeOnly = useCampusStore((s) => s.wireframeOnly);
   const selectBuilding = useCampusStore((s) => s.selectBuilding);
+  const equipment = useCampusStore((s) => s.equipment);
+  const pulseBuildingId = useCampusStore((s) => s.pulseBuildingId);
 
   const isSelected = selectedBuildingId === building.id;
   const isMatch = matchingBuildingIds.includes(building.id);
+  const isPulsing = pulseBuildingId === building.id;
 
   // Status computation for building edge color
   const statusColor = useMemo(() => {
+    if (isPulsing) return '#00f0ff'; // Bright cyan flash on booking success
     if (building.equipmentIds.length === 0) {
       return building.neonColor;
     }
-    const units = building.equipmentIds.map((id) => MOCK_EQUIPMENT[id]).filter(Boolean);
+    const units = building.equipmentIds.map((id) => equipment[id]).filter(Boolean);
     const hasMaintenance = units.some((u) => u.status === 'maintenance');
-    const allBooked = units.every((u) => u.status === 'booked');
+    const allBooked = units.length > 0 && units.every((u) => u.status === 'booked');
     const hasAvailable = units.some((u) => u.status === 'available');
 
     if (allBooked) return '#ef4444'; // Red
     if (hasMaintenance) return '#eab308'; // Yellow
-    if (hasAvailable) return building.neonColor; // Theme neon (or #22c55e)
+    if (hasAvailable) return building.neonColor; // Theme neon
     return building.neonColor;
-  }, [building]);
+  }, [building, equipment, isPulsing]);
 
   // Procedural architecture elements
   const { mainBoxGeo, edgesGeo, facadeLinesGeo, stepsGeo, extraBoxes } = useMemo(() => {

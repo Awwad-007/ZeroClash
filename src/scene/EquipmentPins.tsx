@@ -8,6 +8,7 @@ export const EquipmentPins: React.FC = () => {
   const matchingUnitIds = useCampusStore((s) => s.matchingUnitIds);
   const matchingBuildingIds = useCampusStore((s) => s.matchingBuildingIds);
   const selectUnit = useCampusStore((s) => s.selectUnit);
+  const equipment = useCampusStore((s) => s.equipment);
 
   return (
     <group>
@@ -20,7 +21,7 @@ export const EquipmentPins: React.FC = () => {
         return (
           <group key={building.id} position={building.position}>
             {building.equipmentIds.map((unitId, index) => {
-              const unit = MOCK_EQUIPMENT[unitId];
+              const unit = equipment[unitId];
               if (!unit) return null;
 
               const isSelected = selectedUnitId === unitId;

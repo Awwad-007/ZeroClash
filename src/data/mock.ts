@@ -1,63 +1,6 @@
-export type EquipmentStatus = 'available' | 'booked' | 'maintenance';
+export * from '../types';
+import { EquipmentUnit, Building } from '../types';
 
-export interface Booking {
-  id: string;
-  unitId: string;
-  userName: string;
-  userRole: 'Student' | 'Faculty' | 'Researcher' | 'Lab Admin';
-  startTime: string;
-  endTime: string;
-  purpose: string;
-}
-
-export interface WaitlistEntry {
-  id: string;
-  unitId: string;
-  userName: string;
-  userRole: string;
-  priorityScore: number;
-  requestedAt: string;
-}
-
-export interface EquipmentUnit {
-  id: string;
-  name: string;
-  unitNumber: string; // e.g. "#04"
-  type: 'camera' | 'gpu' | 'vr' | 'microscope' | 'printer' | 'projector' | 'labkit' | 'device';
-  iconUrl: string;
-  buildingId: string;
-  buildingName: string;
-  status: EquipmentStatus;
-  statusText: string;
-  currentBooking?: Booking;
-  nextBooking?: {
-    startTime: string;
-    endTime: string;
-    userName: string;
-  };
-  specs: {
-    model: string;
-    resolution?: string;
-    vram?: string;
-    features?: string;
-  };
-  aliases: string[];
-}
-
-export interface Building {
-  id: string;
-  name: string;
-  code: string;
-  category: 'science' | 'media' | 'library' | 'annex' | 'archive';
-  colorTheme: 'cyan' | 'green' | 'orange' | 'dark-blue';
-  neonColor: string;
-  fillColor: string;
-  position: [number, number, number];
-  size: [number, number, number];
-  rotation?: [number, number, number];
-  architecturalType: 'science-wing' | 'stepped-annex' | 'media-hall' | 'classical-library' | 'cube-archive';
-  equipmentIds: string[];
-}
 
 export const MOCK_BUILDINGS: Building[] = [
   {
@@ -230,15 +173,6 @@ export const MOCK_EQUIPMENT: Record<string, EquipmentUnit> = {
     buildingName: 'Block A - Media Wing',
     status: 'booked',
     statusText: 'IN USE until 05:30 PM today (Devin T.)',
-    currentBooking: {
-      id: 'bk-gpu-101',
-      unitId: 'eq-gpu-01',
-      userName: 'Devin T.',
-      userRole: 'Researcher',
-      startTime: '10:00 AM',
-      endTime: '05:30 PM',
-      purpose: 'Deep Learning Diffusion Model Benchmark',
-    },
     specs: {
       model: 'NVIDIA RTX 4090 24GB Server Node',
       vram: '24GB GDDR6X',
@@ -278,15 +212,6 @@ export const MOCK_EQUIPMENT: Record<string, EquipmentUnit> = {
     buildingName: 'Main Library Locker - Bay 3',
     status: 'booked',
     statusText: 'IN USE until 03:00 PM today (Sarah K.)',
-    currentBooking: {
-      id: 'bk-cam-202',
-      unitId: 'eq-cam-02',
-      userName: 'Sarah K.',
-      userRole: 'Student',
-      startTime: '11:00 AM',
-      endTime: '03:00 PM',
-      purpose: 'Design Documentary Interview B-Roll',
-    },
     specs: {
       model: 'Sony FX3 Cinema Line',
       resolution: '12.1MP Full-Frame 4K120p',
@@ -365,15 +290,6 @@ export const MOCK_EQUIPMENT: Record<string, EquipmentUnit> = {
     buildingName: 'Block B - Studio 1',
     status: 'booked',
     statusText: 'IN USE until 04:15 PM today (Liam N.)',
-    currentBooking: {
-      id: 'bk-vr-303',
-      unitId: 'eq-vr-03',
-      userName: 'Liam N.',
-      userRole: 'Faculty',
-      startTime: '01:00 PM',
-      endTime: '04:15 PM',
-      purpose: 'Interactive Architecture Simulation',
-    },
     specs: {
       model: 'Apple Vision Pro 512GB',
       resolution: 'Micro-OLED 23 million pixels',
