@@ -9,25 +9,36 @@ import {
   HoldEntry,
   MaintenanceRecord,
   AuditLogEntry,
-  UserRole,
 } from '../types';
 import { BookingEngine, CreateBookingParams, JoinWaitlistParams } from '../engine/bookingEngine';
 import { SEED_USERS, SEED_BOOKINGS, SEED_WAITLIST, SEED_MAINTENANCE } from '../data/seedData';
-import { checkAvailability } from '../engine/conflict';
+import { dataSource, ConnectionStatus, ServerEvent } from '../api';
 
-// Global singleton instance of BookingEngine with seeded realistic state
-const initialEngine = new BookingEngine({
-  bookings: SEED_BOOKINGS,
-  waitlist: SEED_WAITLIST,
+// Initial fallback engine for purely local derivations
+const localFallbackEngine = new BookingEngine({
+  bookings: [...SEED_BOOKINGS],
+  waitlist: [...SEED_WAITLIST],
   holds: [],
-  maintenance: SEED_MAINTENANCE,
+  maintenance: [...SEED_MAINTENANCE],
   auditLogs: [],
 });
 
-function deriveAllEquipment(engine: BookingEngine, currentTime: Date = new Date()): Record<string, EquipmentUnit> {
+function deriveAllEquipment(
+  bookings: Booking[],
+  maintenance: MaintenanceRecord[],
+  currentTime: Date = new Date()
+): Record<string, EquipmentUnit> {
   const result: Record<string, EquipmentUnit> = {};
+  const tempEngine = new BookingEngine({
+    bookings,
+    waitlist: [],
+    holds: [],
+    maintenance,
+    auditLogs: [],
+  });
+
   for (const [id, baseUnit] of Object.entries(MOCK_EQUIPMENT)) {
-    const derived = engine.deriveUnitStatus(baseUnit, currentTime);
+    const derived = tempEngine.deriveUnitStatus(baseUnit, currentTime);
     result[id] = {
       ...baseUnit,
       status: derived.status,
@@ -37,6 +48,14 @@ function deriveAllEquipment(engine: BookingEngine, currentTime: Date = new Date(
     };
   }
   return result;
+}
+
+export interface Toast {
+  id: string;
+  type: 'success' | 'error' | 'warning' | 'info';
+  title: string;
+  message: string;
+  duration?: number;
 }
 
 interface CampusState {
@@ -53,6 +72,9 @@ interface CampusState {
 
   matchingBuildingIds: string[];
   matchingUnitIds: string[];
+
+  // Connection & DataSource
+  connectionStatus: ConnectionStatus;
 
   // Reactive Data & Engine state
   engine: BookingEngine;
@@ -90,29 +112,63 @@ interface CampusState {
   setIsMyBookingsOpen: (open: boolean) => void;
   triggerBuildingPulse: (bldgId: string) => void;
 
-  // Engine Actions
+  // Engine Actions (optimistic UI with rollback)
   createBooking: (params: Omit<CreateBookingParams, 'userId' | 'userName' | 'userRole'>) => Promise<Booking>;
   cancelBooking: (bookingId: string) => Promise<{ cancelledBooking: Booking; message: string }>;
   modifyBooking: (bookingId: string, newStart: Date, newEnd: Date) => Promise<Booking>;
-  joinWaitlist: (params: Omit<JoinWaitlistParams, 'userId' | 'userName' | 'userRole'>) => WaitlistEntry;
-  confirmHold: (holdId: string) => Booking;
-  setMaintenance: (unitId: string, isActive: boolean, reason?: string, expectedReturnTime?: Date) => void;
+  joinWaitlist: (params: Omit<JoinWaitlistParams, 'userId' | 'userName' | 'userRole'>) => Promise<WaitlistEntry>;
+  confirmHold: (holdId: string) => Promise<Booking>;
+  setMaintenance: (unitId: string, isActive: boolean, reason?: string, expectedReturnTime?: Date) => Promise<void>;
   refreshState: () => void;
-}
-
-export interface Toast {
-  id: string;
-  type: 'success' | 'error' | 'warning' | 'info';
-  title: string;
-  message: string;
-  duration?: number;
 }
 
 const DEFAULT_TARGET: [number, number, number] = [-0.5, 0, -1.8];
 const DEFAULT_ZOOM = 28;
 
 export const useCampusStore = create<CampusState>((set, get) => {
-  const initialEquip = deriveAllEquipment(initialEngine);
+  const initialEquip = deriveAllEquipment(SEED_BOOKINGS, SEED_MAINTENANCE);
+
+  // Subscribe to dataSource status changes
+  dataSource.onStatusChange((status) => {
+    set({ connectionStatus: status });
+  });
+
+  // Subscribe to live WebSocket / engine events
+  dataSource.subscribe((event: ServerEvent) => {
+    const { bookings, maintenance, refreshState, addToast, equipment } = get();
+    if (event.event === 'booking_created' && event.data) {
+      const b = event.data;
+      const parsedBooking: Booking = {
+        id: b.id,
+        unitId: b.unit_id || b.unitId,
+        userId: b.user_id || b.userId,
+        userName: b.user_name || b.userName,
+        userRole: b.user_role || b.userRole,
+        startTime: new Date(b.start_time || b.startTime),
+        endTime: new Date(b.end_time || b.endTime),
+        purpose: b.purpose,
+        status: b.status,
+        createdAt: new Date(b.created_at || b.createdAt || Date.now()),
+      };
+      if (!bookings.some((existing) => existing.id === parsedBooking.id)) {
+        set((state) => ({ bookings: [...state.bookings, parsedBooking] }));
+        refreshState();
+      }
+    } else if (event.event === 'booking_cancelled' && event.data) {
+      const cancelledId = event.data.booking_id || event.data.bookingId;
+      set((state) => ({
+        bookings: state.bookings.map((b) => (b.id === cancelledId ? { ...b, status: 'cancelled' } : b)),
+      }));
+      refreshState();
+    } else if (event.event === 'maintenance_changed' || event.event === 'maintenance_updated') {
+      refreshState();
+    }
+  });
+
+  // Initialize data source in background
+  dataSource.init().catch((err) => {
+    console.warn('[CampusStore] DataSource init warning:', err);
+  });
 
   return {
     searchQuery: '',
@@ -128,15 +184,17 @@ export const useCampusStore = create<CampusState>((set, get) => {
     matchingBuildingIds: MOCK_BUILDINGS.map((b) => b.id),
     matchingUnitIds: Object.keys(initialEquip),
 
-    engine: initialEngine,
+    connectionStatus: dataSource.status,
+
+    engine: localFallbackEngine,
     equipment: initialEquip,
     currentUser: SEED_USERS[0], // Alex M. (Student)
     allUsers: SEED_USERS,
-    bookings: initialEngine.getBookings(),
-    waitlist: initialEngine.getWaitlist(),
-    holds: initialEngine.getHolds(),
-    maintenance: initialEngine.getMaintenance(),
-    auditLogs: initialEngine.getAuditLogs(),
+    bookings: [...SEED_BOOKINGS],
+    waitlist: [...SEED_WAITLIST],
+    holds: [],
+    maintenance: [...SEED_MAINTENANCE],
+    auditLogs: [],
 
     isMyBookingsOpen: false,
     toasts: [],
@@ -155,16 +213,9 @@ export const useCampusStore = create<CampusState>((set, get) => {
     },
 
     refreshState: () => {
-      const { engine } = get();
-      const updatedEquip = deriveAllEquipment(engine);
-      set({
-        equipment: updatedEquip,
-        bookings: engine.getBookings(),
-        waitlist: engine.getWaitlist(),
-        holds: engine.getHolds(),
-        maintenance: engine.getMaintenance(),
-        auditLogs: engine.getAuditLogs(),
-      });
+      const { bookings, maintenance } = get();
+      const updatedEquip = deriveAllEquipment(bookings, maintenance);
+      set({ equipment: updatedEquip });
     },
 
     setSearchQuery: (query: string) => {
@@ -302,70 +353,163 @@ export const useCampusStore = create<CampusState>((set, get) => {
     },
 
     createBooking: async (params) => {
-      const { engine, currentUser, triggerBuildingPulse, refreshState, equipment, addToast } = get();
+      const { currentUser, triggerBuildingPulse, refreshState, equipment, addToast } = get();
       const unit = equipment[params.unitId];
 
-      const newBooking = await engine.createBooking({
-        ...params,
+      // Optimistic booking insertion
+      const optimisticId = `opt-${Date.now()}`;
+      const optimisticBooking: Booking = {
+        id: optimisticId,
+        unitId: params.unitId,
         userId: currentUser.id,
         userName: currentUser.name,
         userRole: currentUser.role,
-      });
+        startTime: params.startTime,
+        endTime: params.endTime,
+        purpose: params.purpose,
+        status: 'active',
+        createdAt: new Date(),
+      };
 
+      set((state) => ({ bookings: [...state.bookings, optimisticBooking] }));
       refreshState();
-      if (unit) {
-        triggerBuildingPulse(unit.buildingId);
-        addToast({
-          type: 'success',
-          title: 'Booking Confirmed',
-          message: `${unit.name} ${unit.unitNumber} reserved until ${newBooking.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+
+      try {
+        const confirmedBooking = await dataSource.createBooking({
+          ...params,
+          userId: currentUser.id,
+          userName: currentUser.name,
+          userRole: currentUser.role,
         });
+
+        // Swap optimistic ID with confirmed booking
+        set((state) => ({
+          bookings: state.bookings.map((b) => (b.id === optimisticId ? confirmedBooking : b)),
+        }));
+        refreshState();
+
+        if (unit) {
+          triggerBuildingPulse(unit.buildingId);
+          addToast({
+            type: 'success',
+            title: 'Booking Confirmed',
+            message: `${unit.name} ${unit.unitNumber} reserved until ${confirmedBooking.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+          });
+        }
+        return confirmedBooking;
+      } catch (err: any) {
+        // Rollback optimistic state
+        set((state) => ({
+          bookings: state.bookings.filter((b) => b.id !== optimisticId),
+        }));
+        refreshState();
+
+        addToast({
+          type: 'error',
+          title: err.status === 409 ? 'Slot Conflict (409)' : 'Booking Failed',
+          message: err.message || 'The requested slot clashes with another active reservation.',
+          duration: 5500,
+        });
+        throw err;
       }
-      return newBooking;
     },
 
     cancelBooking: async (bookingId: string) => {
-      const { engine, currentUser, refreshState, addToast } = get();
-      const res = await engine.cancelBooking(bookingId, currentUser.id);
+      const { currentUser, refreshState, addToast, bookings } = get();
+      const target = bookings.find((b) => b.id === bookingId);
+
+      // Optimistic cancel
+      set((state) => ({
+        bookings: state.bookings.map((b) => (b.id === bookingId ? { ...b, status: 'cancelled' } : b)),
+      }));
       refreshState();
-      addToast({
-        type: 'info',
-        title: 'Booking Cancelled',
-        message: res.cascadeResult.message,
-      });
-      return {
-        cancelledBooking: res.cancelledBooking,
-        message: res.cascadeResult.message,
-      };
+
+      try {
+        const res = await dataSource.cancelBooking(bookingId, currentUser.id);
+        refreshState();
+        addToast({
+          type: 'info',
+          title: 'Booking Cancelled',
+          message: res.message,
+        });
+        return res;
+      } catch (err: any) {
+        // Rollback if cancellation fails
+        if (target) {
+          set((state) => ({
+            bookings: state.bookings.map((b) => (b.id === bookingId ? target : b)),
+          }));
+          refreshState();
+        }
+        addToast({
+          type: 'error',
+          title: 'Cancellation Failed',
+          message: err.message || 'Could not cancel booking.',
+        });
+        throw err;
+      }
     },
 
     modifyBooking: async (bookingId: string, newStart: Date, newEnd: Date) => {
-      const { engine, currentUser, refreshState, equipment, triggerBuildingPulse, addToast } = get();
-      const modified = await engine.modifyBooking(bookingId, newStart, newEnd, currentUser.id);
+      const { currentUser, refreshState, equipment, triggerBuildingPulse, addToast, bookings } = get();
+      const original = bookings.find((b) => b.id === bookingId);
+      if (!original) throw new Error('Booking not found');
+
+      // Optimistic modify
+      set((state) => ({
+        bookings: state.bookings.map((b) =>
+          b.id === bookingId ? { ...b, startTime: newStart, endTime: newEnd } : b
+        ),
+      }));
       refreshState();
-      const unit = equipment[modified.unitId];
-      if (unit) {
-        triggerBuildingPulse(unit.buildingId);
+
+      try {
+        const modified = await dataSource.modifyBooking(bookingId, newStart, newEnd, currentUser.id);
+        set((state) => ({
+          bookings: state.bookings.map((b) => (b.id === bookingId ? modified : b)),
+        }));
+        refreshState();
+
+        const unit = equipment[modified.unitId];
+        if (unit) {
+          triggerBuildingPulse(unit.buildingId);
+          addToast({
+            type: 'success',
+            title: 'Reservation Rescheduled',
+            message: `${unit.name} shifted to ${newStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${newEnd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+          });
+        }
+        return modified;
+      } catch (err: any) {
+        // Rollback to original interval
+        set((state) => ({
+          bookings: state.bookings.map((b) => (b.id === bookingId ? original : b)),
+        }));
+        refreshState();
+
         addToast({
-          type: 'success',
-          title: 'Reservation Rescheduled',
-          message: `${unit.name} shifted to ${newStart.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} - ${newEnd.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+          type: 'error',
+          title: 'Reschedule Conflict (409)',
+          message: err.message || 'Requested time window conflicts with another user.',
         });
+        throw err;
       }
-      return modified;
     },
 
-    joinWaitlist: (params) => {
-      const { engine, currentUser, refreshState, addToast, equipment } = get();
+    joinWaitlist: async (params) => {
+      const { currentUser, refreshState, addToast, equipment } = get();
       const unit = equipment[params.unitId];
-      const entry = engine.joinWaitlist({
+      const entry = await dataSource.joinWaitlist({
         ...params,
         userId: currentUser.id,
         userName: currentUser.name,
         userRole: currentUser.role,
         noShowCount: currentUser.noShowCount,
       });
+
+      set((state) => ({ waitlist: [...state.waitlist, entry] }));
       refreshState();
+
       addToast({
         type: 'success',
         title: 'Added to Priority Waitlist',
@@ -374,10 +518,16 @@ export const useCampusStore = create<CampusState>((set, get) => {
       return entry;
     },
 
-    confirmHold: (holdId: string) => {
-      const { engine, refreshState, equipment, triggerBuildingPulse, addToast } = get();
-      const booking = engine.confirmHold(holdId);
+    confirmHold: async (holdId: string) => {
+      const { currentUser, refreshState, equipment, triggerBuildingPulse, addToast } = get();
+      const booking = await dataSource.confirmHold(holdId, currentUser.id);
+
+      set((state) => ({
+        bookings: [...state.bookings, booking],
+        holds: state.holds.map((h) => (h.id === holdId ? { ...h, confirmed: true } : h)),
+      }));
       refreshState();
+
       const unit = equipment[booking.unitId];
       if (unit) {
         triggerBuildingPulse(unit.buildingId);
@@ -390,9 +540,20 @@ export const useCampusStore = create<CampusState>((set, get) => {
       return booking;
     },
 
-    setMaintenance: (unitId: string, isActive: boolean, reason?: string, expectedReturnTime?: Date) => {
-      const { engine, currentUser, refreshState, equipment, triggerBuildingPulse } = get();
-      engine.setMaintenance(unitId, isActive, reason, expectedReturnTime, new Date(), currentUser.id);
+    setMaintenance: async (unitId: string, isActive: boolean, reason?: string, expectedReturnTime?: Date) => {
+      const { currentUser, refreshState, equipment, triggerBuildingPulse } = get();
+      const rec = await dataSource.setMaintenance(unitId, isActive, reason, expectedReturnTime, currentUser.id);
+
+      if (isActive && rec) {
+        set((state) => ({
+          maintenance: [...state.maintenance.filter((m) => m.unitId !== unitId), rec],
+        }));
+      } else {
+        set((state) => ({
+          maintenance: state.maintenance.map((m) => (m.unitId === unitId ? { ...m, isActive: false } : m)),
+        }));
+      }
+
       refreshState();
       const unit = equipment[unitId];
       if (unit) {

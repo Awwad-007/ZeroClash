@@ -5,9 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "server": "python -m uvicorn backend.main:app --reload --port 8000",
+    "dev:all": "concurrently -k -p \"[{name}]\" -n \"VITE,FASTAPI\" -c \"cyan,magenta\" \"npm run dev\" \"python -m uvicorn backend.main:app --reload --port 8000\"",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:backend": "python -m pytest backend/tests",
+    "test:all": "vitest run && python -m pytest backend/tests"
   },
   "dependencies": {
     "@react-three/drei": "^10.0.3",
@@ -28,6 +32,7 @@
     "@types/three": "^0.174.0",
     "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
+    "concurrently": "^10.0.6",
     "postcss": "^8.5.3",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.3",
