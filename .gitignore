@@ -40,3 +40,10 @@ vite.config.d.ts
 # Test screenshots in root
 /chrome_*.png
 /edge_*.png
+
+# Python / SQLite
+*.db
+__pycache__/
+*.pyc
+.pytest_cache/
+
