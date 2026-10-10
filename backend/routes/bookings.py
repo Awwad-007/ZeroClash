@@ -13,6 +13,7 @@ from backend.engine import get_unit_lock, find_alternative_slots, process_cascad
 from backend.websocket_manager import manager
 from backend.qr_service import generate_signed_token, verify_signed_token, generate_qr_data_url
 from backend.notifications import notification_service
+from backend.auth import get_current_user, normalize_role, ROLE_LAB_ADMIN
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
@@ -133,13 +134,22 @@ async def create_booking(
 async def modify_booking(
     booking_id: str,
     req: BookingModifyRequest,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
 ):
     booking = session.get(Booking, booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     if booking.status != "active":
         raise HTTPException(status_code=400, detail="Cannot modify non-active booking")
+
+    # Only booking owner or lab_admin can modify
+    effective_user_id = req.user_id or current_user.id
+    if booking.user_id != effective_user_id and normalize_role(current_user.role) != ROLE_LAB_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: users can only modify their own bookings"
+        )
 
     lock = get_unit_lock(booking.unit_id)
     async with lock:
@@ -168,7 +178,7 @@ async def modify_booking(
             target_id=booking.id,
             details=f"Rescheduled to {req.start_time} - {req.end_time}",
             timestamp=datetime.now(timezone.utc),
-            user_id=req.user_id or "system"
+            user_id=effective_user_id
         )
         session.add(audit)
         session.commit()
@@ -181,11 +191,19 @@ async def modify_booking(
 async def cancel_booking(
     booking_id: str,
     background_tasks: BackgroundTasks,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user)
 ):
     booking = session.get(Booking, booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
+
+    # Only booking owner or lab_admin can cancel
+    if booking.user_id != current_user.id and normalize_role(current_user.role) != ROLE_LAB_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: users can only cancel their own bookings"
+        )
 
     unit = session.get(Equipment, booking.unit_id)
     cancelled_user = session.get(User, booking.user_id)

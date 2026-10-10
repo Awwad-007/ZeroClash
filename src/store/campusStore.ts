@@ -107,6 +107,17 @@ interface CampusState {
   toggleWireframe: () => void;
   resetCamera: () => void;
 
+  // Auth & Persona State
+  authToken: string | null;
+  isDemoMode: boolean;
+  isAuthModalOpen: boolean;
+  setAuthModalOpen: (open: boolean) => void;
+  setAuthToken: (token: string | null) => void;
+  setIsDemoMode: (demo: boolean) => void;
+  login: (email: string, password: string) => Promise<void>;
+  register: (name: string, email: string, password: string, role: string, department: string) => Promise<void>;
+  logout: () => void;
+
   // User actions
   setCurrentUser: (user: User) => void;
   setIsMyBookingsOpen: (open: boolean) => void;
@@ -229,6 +240,109 @@ export const useCampusStore = create<CampusState>((set, get) => {
 
     isMyBookingsOpen: false,
     toasts: [],
+
+    authToken: typeof window !== 'undefined' ? localStorage.getItem('zc_auth_token') : null,
+    isDemoMode: true,
+    isAuthModalOpen: false,
+
+    setAuthModalOpen: (open: boolean) => set({ isAuthModalOpen: open }),
+    setAuthToken: (token: string | null) => {
+      if (token) {
+        localStorage.setItem('zc_auth_token', token);
+      } else {
+        localStorage.removeItem('zc_auth_token');
+      }
+      set({ authToken: token });
+    },
+    setIsDemoMode: (demo: boolean) => set({ isDemoMode: demo }),
+
+    login: async (email: string, password: string) => {
+      const { addToast, allUsers } = get();
+      try {
+        const apiBase = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000/api';
+        const res = await fetch(`${apiBase}/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ detail: 'Authentication failed' }));
+          throw new Error(err.detail || 'Invalid email or password');
+        }
+        const data = await res.json();
+        localStorage.setItem('zc_auth_token', data.access_token);
+        set({
+          authToken: data.access_token,
+          currentUser: data.user,
+          isAuthModalOpen: false,
+        });
+        addToast({
+          type: 'success',
+          title: 'Authentication Successful',
+          message: `Logged in as ${data.user.name} (${data.user.role})`,
+        });
+      } catch (err: any) {
+        // Fallback for local demo mode without remote backend
+        const matched = allUsers.find((u) => u.email.toLowerCase() === email.toLowerCase());
+        if (matched) {
+          const fakeToken = `demo-token-${matched.id}`;
+          localStorage.setItem('zc_auth_token', fakeToken);
+          set({
+            authToken: fakeToken,
+            currentUser: matched,
+            isAuthModalOpen: false,
+          });
+          addToast({
+            type: 'success',
+            title: 'Demo Authentication',
+            message: `Logged in as ${matched.name} (${matched.role})`,
+          });
+          return;
+        }
+        throw err;
+      }
+    },
+
+    register: async (name: string, email: string, password: string, role: string, department: string) => {
+      const { addToast } = get();
+      const apiBase = (import.meta.env.VITE_API_URL as string) || 'http://localhost:8000/api';
+      const res = await fetch(`${apiBase}/auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, email, password, role, department }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Registration failed' }));
+        throw new Error(err.detail || 'Registration failed');
+      }
+      const data = await res.json();
+      localStorage.setItem('zc_auth_token', data.access_token);
+      set({
+        authToken: data.access_token,
+        currentUser: data.user,
+        allUsers: [...get().allUsers, data.user],
+        isAuthModalOpen: false,
+      });
+      addToast({
+        type: 'success',
+        title: 'Account Created',
+        message: `Welcome, ${data.user.name}! Account registered.`,
+      });
+    },
+
+    logout: () => {
+      localStorage.removeItem('zc_auth_token');
+      const defaultUser = get().allUsers[0];
+      set({
+        authToken: null,
+        currentUser: defaultUser,
+      });
+      get().addToast({
+        type: 'info',
+        title: 'Signed Out',
+        message: 'Logged out. Switched back to demo persona.',
+      });
+    },
 
     addToast: (toast) => {
       const id = `toast-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;

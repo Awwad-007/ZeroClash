@@ -879,6 +879,195 @@ async def test_analytics_forecast_ml_model_with_8_weeks_history():
         assert "kpis" in data
         assert "model_mae" in data["kpis"]
 
+@pytest.mark.asyncio
+async def test_auth_register_and_login_jwt():
+    """
+    Verifies user registration, bcrypt password hashing, and JWT token issuance.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Register new researcher
+        reg_resp = await client.post("/auth/register", json={
+            "name": "Dr. Marie Curie",
+            "email": "m.curie@campus.edu",
+            "password": "QuantumSuperSecret123!",
+            "role": "Researcher",
+            "department": "Radiological Physics"
+        })
+        assert reg_resp.status_code == 200
+        reg_data = reg_resp.json()
+        assert "access_token" in reg_data
+        assert reg_data["user"]["email"] == "m.curie@campus.edu"
+        token = reg_data["access_token"]
+
+        # Duplicate register rejects with 400
+        dup_resp = await client.post("/auth/register", json={
+            "name": "Dr. Marie Curie",
+            "email": "m.curie@campus.edu",
+            "password": "AnyPassword",
+            "role": "Researcher",
+            "department": "Physics"
+        })
+        assert dup_resp.status_code == 400
+
+        # 2. Login with correct password
+        login_resp = await client.post("/auth/login", json={
+            "email": "m.curie@campus.edu",
+            "password": "QuantumSuperSecret123!"
+        })
+        assert login_resp.status_code == 200
+        assert "access_token" in login_resp.json()
+
+        # Login with wrong password returns 401
+        bad_login = await client.post("/auth/login", json={
+            "email": "m.curie@campus.edu",
+            "password": "WrongPassword"
+        })
+        assert bad_login.status_code == 401
+
+        # 3. Call /auth/me with Bearer token
+        me_resp = await client.get("/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me_resp.status_code == 200
+        assert me_resp.json()["name"] == "Dr. Marie Curie"
+
+@pytest.mark.asyncio
+async def test_admin_routes_protected_by_lab_admin_role():
+    """
+    Verifies that admin routes (maintenance, audit logs) require the lab_admin role,
+    returning 403 Forbidden for students or unauthorized personas.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        with Session(test_engine) as session:
+            if not session.get(Equipment, "eq-gpu-01"):
+                session.add(Equipment(
+                    id="eq-gpu-01",
+                    name="NVIDIA H100 GPU",
+                    unit_number="#01",
+                    type="gpu",
+                    icon_url="/assets/icons/gpu.png",
+                    building_id="bldg-comp-1",
+                    building_name="Block B",
+                    status="available"
+                ))
+                session.commit()
+
+        # 1. Create a Student user & token
+        res_stu = await client.post("/auth/register", json={
+            "name": "Student Bob",
+            "email": "bob.student@campus.edu",
+            "password": "Password123!",
+            "role": "Student",
+            "department": "CS"
+        })
+        assert res_stu.status_code == 200
+        student_token = res_stu.json()["access_token"]
+
+        # 2. Create a Lab Admin user & token
+        res_adm = await client.post("/auth/register", json={
+            "name": "Admin Alice",
+            "email": "alice.admin@campus.edu",
+            "password": "AdminPassword123!",
+            "role": "Lab Admin",
+            "department": "Infrastructure"
+        })
+        assert res_adm.status_code == 200
+        admin_token = res_adm.json()["access_token"]
+
+        # 3. Student tries to access audit logs -> 403 Forbidden
+        stu_audit = await client.get("/admin/audit-logs", headers={"Authorization": f"Bearer {student_token}"})
+        assert stu_audit.status_code == 403
+
+        # 4. Lab Admin accesses audit logs -> 200 OK
+        adm_audit = await client.get("/admin/audit-logs", headers={"Authorization": f"Bearer {admin_token}"})
+        assert adm_audit.status_code == 200
+
+        # 5. Student tries to toggle maintenance -> 403 Forbidden
+        stu_maint = await client.post("/admin/maintenance", json={
+            "unit_id": "eq-gpu-01",
+            "is_active": True,
+            "reason": "Unauthorized Hack"
+        }, headers={"Authorization": f"Bearer {student_token}"})
+        assert stu_maint.status_code == 403
+
+        # 6. Lab Admin toggles maintenance -> 200 OK
+        adm_maint = await client.post("/admin/maintenance", json={
+            "unit_id": "eq-gpu-01",
+            "is_active": False,
+            "reason": "Authorized Reset"
+        }, headers={"Authorization": f"Bearer {admin_token}"})
+        assert adm_maint.status_code == 200
+
+@pytest.mark.asyncio
+async def test_user_cannot_cancel_or_modify_other_users_booking():
+    """
+    Verifies that users can only modify or cancel their own bookings,
+    while another user is rejected with 403 Forbidden.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Register User A
+        res_a = await client.post("/auth/register", json={
+            "name": "User Alpha",
+            "email": "user.a@campus.edu",
+            "password": "PasswordA123!",
+            "role": "Student",
+            "department": "Physics"
+        })
+        user_a_token = res_a.json()["access_token"]
+        user_a_id = res_a.json()["user"]["id"]
+
+        # Register User B
+        res_b = await client.post("/auth/register", json={
+            "name": "User Beta",
+            "email": "user.b@campus.edu",
+            "password": "PasswordB123!",
+            "role": "Student",
+            "department": "Math"
+        })
+        user_b_token = res_b.json()["access_token"]
+
+        # User A creates a booking
+        start_time = datetime.now(timezone.utc) + timedelta(days=7, hours=10)
+        end_time = start_time + timedelta(hours=2)
+        res_book = await client.post("/bookings", json={
+            "unit_id": "eq-cam-01",
+            "user_id": user_a_id,
+            "user_name": "User Alpha",
+            "user_role": "Student",
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "purpose": "Alpha's Private Shoot"
+        }, headers={"Authorization": f"Bearer {user_a_token}"})
+        assert res_book.status_code == 201
+        booking_id = res_book.json()["id"]
+
+        # User B attempts to cancel User A's booking -> 403 Forbidden
+        res_cancel_b = await client.delete(
+            f"/bookings/{booking_id}",
+            headers={"Authorization": f"Bearer {user_b_token}"}
+        )
+        assert res_cancel_b.status_code == 403
+        assert "only cancel their own" in res_cancel_b.json()["detail"].lower()
+
+        # User B attempts to modify User A's booking -> 403 Forbidden
+        new_start = start_time + timedelta(hours=1)
+        new_end = end_time + timedelta(hours=1)
+        res_mod_b = await client.patch(
+            f"/bookings/{booking_id}",
+            json={"start_time": new_start.isoformat(), "end_time": new_end.isoformat()},
+            headers={"Authorization": f"Bearer {user_b_token}"}
+        )
+        assert res_mod_b.status_code == 403
+
+        # User A cancels their own booking -> 200 OK
+        res_cancel_a = await client.delete(
+            f"/bookings/{booking_id}",
+            headers={"Authorization": f"Bearer {user_a_token}"}
+        )
+        assert res_cancel_a.status_code == 200
+
+
 
 
 

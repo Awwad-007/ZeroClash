@@ -36,6 +36,20 @@ export class RemoteSource implements DataSource {
     return this._status;
   }
 
+  private getAuthHeaders(extraUserId?: string): HeadersInit {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('zc_auth_token') : null;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    if (extraUserId) {
+      headers['X-Demo-User-Id'] = extraUserId;
+    }
+    return headers;
+  }
+
   private setStatus(newStatus: ConnectionStatus) {
     if (this._status !== newStatus) {
       this._status = newStatus;
@@ -240,14 +254,18 @@ export class RemoteSource implements DataSource {
   }
 
   async getMaintenance(): Promise<MaintenanceRecord[]> {
-    const res = await fetch(`${this.apiBase}/admin/maintenance`);
+    const res = await fetch(`${this.apiBase}/admin/maintenance`, {
+      headers: this.getAuthHeaders(),
+    });
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
     const data: any[] = await res.json();
     return data.map((m) => this.mapMaintenance(m));
   }
 
   async getAuditLogs(): Promise<AuditLogEntry[]> {
-    const res = await fetch(`${this.apiBase}/admin/audit-logs`);
+    const res = await fetch(`${this.apiBase}/admin/audit-logs`, {
+      headers: this.getAuthHeaders(),
+    });
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
     const data: any[] = await res.json();
     return data.map((l) => ({
@@ -324,6 +342,7 @@ export class RemoteSource implements DataSource {
   async cancelBooking(bookingId: string, userId: string): Promise<{ cancelledBooking: Booking; message: string }> {
     const res = await fetch(`${this.apiBase}/bookings/${bookingId}?user_id=${encodeURIComponent(userId)}`, {
       method: 'DELETE',
+      headers: this.getAuthHeaders(userId),
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({ detail: 'Cancellation failed' }));
@@ -351,7 +370,7 @@ export class RemoteSource implements DataSource {
   async modifyBooking(bookingId: string, newStart: Date, newEnd: Date, userId: string): Promise<Booking> {
     const res = await fetch(`${this.apiBase}/bookings/${bookingId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.getAuthHeaders(userId),
       body: JSON.stringify({
         start_time: newStart.toISOString(),
         end_time: newEnd.toISOString(),
@@ -421,7 +440,7 @@ export class RemoteSource implements DataSource {
   ): Promise<MaintenanceRecord | null> {
     const res = await fetch(`${this.apiBase}/admin/maintenance`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: this.getAuthHeaders(createdBy),
       body: JSON.stringify({
         unit_id: unitId,
         is_active: isActive,

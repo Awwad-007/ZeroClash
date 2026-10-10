@@ -9,6 +9,7 @@ import { ScrollIndicator } from './components/ScrollIndicator';
 import { AnalyticsSection } from './components/AnalyticsSection';
 import { UserSwitcher } from './components/UserSwitcher';
 import { MyBookingsDrawer } from './components/MyBookingsDrawer';
+import { AuthModal } from './components/AuthModal';
 import { ToastContainer } from './components/ToastContainer';
 import { ErrorBoundary } from './components/ErrorBoundary';
 
@@ -20,6 +21,9 @@ export const App: React.FC = () => {
 
       {/* Slide-out My Bookings Drawer */}
       <MyBookingsDrawer />
+
+      {/* Real Authentication & Role Modal */}
+      <AuthModal />
 
       {/* 100vh Hero Section */}
       <section className="relative w-full h-screen overflow-hidden">

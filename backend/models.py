@@ -14,6 +14,7 @@ class User(SQLModel, table=True):
     department: str
     no_show_count: int = Field(default=0)
     reliability_score: int = Field(default=100)
+    hashed_password: Optional[str] = Field(default=None)
 
 class Building(SQLModel, table=True):
     __tablename__ = "buildings"

@@ -18,6 +18,7 @@ from backend.routes.waitlist import router as waitlist_router
 from backend.routes.admin import router as admin_router
 from backend.routes.analytics import router as analytics_router
 from backend.routes.schedule import router as schedule_router
+from backend.routes.auth import router as auth_router
 
 async def hold_expiry_loop():
     """
@@ -170,6 +171,7 @@ app.include_router(waitlist_router)
 app.include_router(admin_router)
 app.include_router(analytics_router)
 app.include_router(schedule_router)
+app.include_router(auth_router)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):

@@ -10,6 +10,7 @@ from backend.database import get_session
 from backend.models import MaintenanceRecord, Booking, Equipment, AuditLog, User
 from backend.websocket_manager import manager
 from backend.notifications import notification_service
+from backend.auth import require_lab_admin
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -24,7 +25,8 @@ class MaintenanceRequest(BaseModel):
 async def toggle_maintenance(
     req: MaintenanceRequest,
     background_tasks: BackgroundTasks,
-    session: Session = Depends(get_session)
+    session: Session = Depends(get_session),
+    admin_user: User = Depends(require_lab_admin)
 ):
     unit = session.get(Equipment, req.unit_id)
     if not unit:
@@ -148,6 +150,9 @@ async def toggle_maintenance(
     }
 
 @router.get("/audit-logs")
-def get_audit_logs(session: Session = Depends(get_session)):
+def get_audit_logs(
+    session: Session = Depends(get_session),
+    admin_user: User = Depends(require_lab_admin)
+):
     stmt = select(AuditLog).order_by(AuditLog.timestamp.desc()).limit(100)
     return session.exec(stmt).all()
