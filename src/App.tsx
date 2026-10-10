@@ -6,7 +6,7 @@ import { EquipmentModal } from './components/EquipmentModal';
 import { StatusLegend } from './components/StatusLegend';
 import { ViewportControls } from './components/ViewportControls';
 import { ScrollIndicator } from './components/ScrollIndicator';
-import { AnalyticsPlaceholder } from './components/AnalyticsPlaceholder';
+import { AnalyticsSection } from './components/AnalyticsSection';
 import { UserSwitcher } from './components/UserSwitcher';
 import { MyBookingsDrawer } from './components/MyBookingsDrawer';
 import { ToastContainer } from './components/ToastContainer';
@@ -77,8 +77,8 @@ export const App: React.FC = () => {
         </div>
       </section>
 
-      {/* Below the Fold Section */}
-      <AnalyticsPlaceholder />
+      {/* Below the Fold Section: Gantt, Heatmap, Waitlist, Admin Overrides */}
+      <AnalyticsSection />
     </div>
   );
 };
