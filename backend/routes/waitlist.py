@@ -1,13 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from datetime import datetime, timezone
 import uuid
 
 from backend.database import get_session
-from backend.models import WaitlistEntry, HoldEntry, Booking, AuditLog
+from backend.models import WaitlistEntry, HoldEntry, Booking, AuditLog, User, Equipment
 from backend.engine import calculate_priority_score
 from backend.websocket_manager import manager
+from backend.qr_service import generate_signed_token
+from backend.notifications import notification_service
 
 router = APIRouter(prefix="", tags=["Waitlist"])
 
@@ -61,6 +63,7 @@ async def join_waitlist(
 @router.post("/holds/{hold_id}/confirm")
 async def confirm_provisional_hold(
     hold_id: str,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
     hold = session.get(HoldEntry, hold_id)
@@ -80,9 +83,13 @@ async def confirm_provisional_hold(
             waitlist_entry.status = "promoted"
             session.add(waitlist_entry)
 
+    booking_id = f"bk-{uuid.uuid4().hex[:8]}"
+    expiry_ts = int(hold.end_time.timestamp())
+    qr_token = generate_signed_token(booking_id, expiry_ts)
+
     # Create active confirmed booking
     new_booking = Booking(
-        id=f"bk-{uuid.uuid4().hex[:8]}",
+        id=booking_id,
         unit_id=hold.unit_id,
         user_id=hold.user_id,
         user_name=hold.user_name,
@@ -91,6 +98,7 @@ async def confirm_provisional_hold(
         end_time=hold.end_time,
         purpose="Promoted from Priority Waitlist Hold",
         status="active",
+        qr_token=qr_token,
         created_at=datetime.now(timezone.utc)
     )
     session.add(new_booking)
@@ -109,5 +117,22 @@ async def confirm_provisional_hold(
 
     await manager.broadcast("hold_confirmed", hold.model_dump())
     await manager.broadcast("booking_created", new_booking.model_dump())
+
+    # Send confirmation email in background
+    user = session.get(User, hold.user_id)
+    unit = session.get(Equipment, hold.unit_id)
+    user_email = user.email if user else f"{hold.user_id}@campus.edu"
+    background_tasks.add_task(
+        notification_service.send_booking_confirmed,
+        user_email=user_email,
+        user_name=hold.user_name,
+        booking_id=new_booking.id,
+        unit_name=unit.name if unit else hold.unit_id,
+        unit_number=unit.unit_number if unit else "",
+        start_time=new_booking.start_time,
+        end_time=new_booking.end_time,
+        purpose=new_booking.purpose,
+        qr_token=new_booking.qr_token
+    )
 
     return new_booking

@@ -56,6 +56,7 @@ class Booking(SQLModel, table=True):
     checked_in_at: Optional[datetime] = Field(default=None)
     checked_out_at: Optional[datetime] = Field(default=None)
     qr_token: Optional[str] = Field(default=None)
+    reminder_sent: bool = Field(default=False)
     created_at: datetime = Field(default_factory=utc_now)
 
 class WaitlistEntry(SQLModel, table=True):

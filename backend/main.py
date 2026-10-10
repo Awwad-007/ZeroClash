@@ -2,14 +2,15 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from sqlmodel import Session, select
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import asyncio
 
 from backend.config import CORS_ORIGINS
 from backend.database import create_db_and_tables, engine
-from backend.models import HoldEntry, WaitlistEntry
+from backend.models import HoldEntry, WaitlistEntry, Booking, User, Equipment
 from backend.engine import process_cascade, process_no_show_releases
 from backend.websocket_manager import manager
+from backend.notifications import notification_service
 
 from backend.routes.equipment import router as equipment_router
 from backend.routes.bookings import router as bookings_router
@@ -21,6 +22,7 @@ async def hold_expiry_loop():
     """
     Background worker loop checking for expired provisional holds every 15 seconds.
     Cascades release to next eligible candidate when hold expires unconfirmed.
+    Dispatches hold expiration emails, hold awarded alerts, and 30-minute slot reminders.
     """
     while True:
         try:
@@ -48,6 +50,18 @@ async def hold_expiry_loop():
 
                     session.commit()
 
+                    # Send hold expired notification in background
+                    hold_user = session.get(User, hold.user_id)
+                    hold_unit = session.get(Equipment, hold.unit_id)
+                    asyncio.create_task(asyncio.to_thread(
+                        notification_service.send_hold_expired,
+                        user_email=hold_user.email if hold_user else f"{hold.user_id}@campus.edu",
+                        user_name=hold.user_name,
+                        hold_id=hold.id,
+                        unit_name=hold_unit.name if hold_unit else hold.unit_id,
+                        unit_number=hold_unit.unit_number if hold_unit else ""
+                    ))
+
                     # Trigger cascade for next candidate
                     next_cand, next_hold, msg = process_cascade(
                         session,
@@ -58,15 +72,67 @@ async def hold_expiry_loop():
                     )
 
                     await manager.broadcast("hold_expired", {"hold_id": hold.id, "unit_id": hold.unit_id})
-                    if next_hold:
+                    if next_hold and next_cand:
                         await manager.broadcast("hold_assigned", next_hold.model_dump())
+                        next_user = session.get(User, next_cand.user_id)
+                        asyncio.create_task(asyncio.to_thread(
+                            notification_service.send_hold_awarded,
+                            user_email=next_user.email if next_user else f"{next_cand.user_id}@campus.edu",
+                            user_name=next_cand.user_name,
+                            hold_id=next_hold.id,
+                            unit_name=hold_unit.name if hold_unit else next_hold.unit_id,
+                            unit_number=hold_unit.unit_number if hold_unit else "",
+                            start_time=next_hold.start_time,
+                            end_time=next_hold.end_time,
+                            expires_at=next_hold.expires_at
+                        ))
 
                 # Check for no-show check-in releases (+15m past start time)
                 released = process_no_show_releases(session, now)
                 for bk, promoted, hold in released:
                     await manager.broadcast("booking_cancelled", {"booking_id": bk.id, "unit_id": bk.unit_id, "reason": "no_show"})
-                    if hold:
+                    if hold and promoted:
                         await manager.broadcast("hold_assigned", hold.model_dump())
+                        promoted_user = session.get(User, promoted.user_id)
+                        promoted_unit = session.get(Equipment, hold.unit_id)
+                        asyncio.create_task(asyncio.to_thread(
+                            notification_service.send_hold_awarded,
+                            user_email=promoted_user.email if promoted_user else f"{promoted.user_id}@campus.edu",
+                            user_name=promoted.user_name,
+                            hold_id=hold.id,
+                            unit_name=promoted_unit.name if promoted_unit else hold.unit_id,
+                            unit_number=promoted_unit.unit_number if promoted_unit else "",
+                            start_time=hold.start_time,
+                            end_time=hold.end_time,
+                            expires_at=hold.expires_at
+                        ))
+
+                # Check for 30-minute booking reminders
+                reminder_window = now + timedelta(minutes=30)
+                upcoming_stmt = select(Booking).where(
+                    Booking.status == "active",
+                    Booking.reminder_sent == False,
+                    Booking.start_time >= now,
+                    Booking.start_time <= reminder_window
+                )
+                upcoming_bookings = session.exec(upcoming_stmt).all()
+                for ub in upcoming_bookings:
+                    ub.reminder_sent = True
+                    session.add(ub)
+                    session.commit()
+
+                    u_user = session.get(User, ub.user_id)
+                    u_unit = session.get(Equipment, ub.unit_id)
+                    asyncio.create_task(asyncio.to_thread(
+                        notification_service.send_reminder_30m,
+                        user_email=u_user.email if u_user else f"{ub.user_id}@campus.edu",
+                        user_name=ub.user_name,
+                        booking_id=ub.id,
+                        unit_name=u_unit.name if u_unit else ub.unit_id,
+                        unit_number=u_unit.unit_number if u_unit else "",
+                        start_time=ub.start_time,
+                        end_time=ub.end_time
+                    ))
 
         except asyncio.CancelledError:
             break

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from sqlmodel import Session, select
 from datetime import datetime, timezone
@@ -7,8 +7,9 @@ import uuid
 import json
 
 from backend.database import get_session
-from backend.models import MaintenanceRecord, Booking, Equipment, AuditLog
+from backend.models import MaintenanceRecord, Booking, Equipment, AuditLog, User
 from backend.websocket_manager import manager
+from backend.notifications import notification_service
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -22,6 +23,7 @@ class MaintenanceRequest(BaseModel):
 @router.post("/maintenance")
 async def toggle_maintenance(
     req: MaintenanceRequest,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
     unit = session.get(Equipment, req.unit_id)
@@ -60,6 +62,21 @@ async def toggle_maintenance(
                 user_id=req.user_id or "admin"
             )
             session.add(audit)
+
+            # Send maintenance cancellation email in background
+            user = session.get(User, cb.user_id)
+            user_email = user.email if user else f"{cb.user_id}@campus.edu"
+            background_tasks.add_task(
+                notification_service.send_maintenance_cancellation,
+                user_email=user_email,
+                user_name=cb.user_name,
+                booking_id=cb.id,
+                unit_name=unit.name,
+                unit_number=unit.unit_number,
+                start_time=cb.start_time,
+                end_time=cb.end_time,
+                maint_reason=req.reason or "Routine Diagnostic Inspection"
+            )
 
         if record:
             record.is_active = True

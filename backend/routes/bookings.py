@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -8,10 +8,11 @@ import uuid
 import asyncio
 
 from backend.database import get_session
-from backend.models import Booking, MaintenanceRecord, AuditLog
+from backend.models import Booking, MaintenanceRecord, AuditLog, User, Equipment
 from backend.engine import get_unit_lock, find_alternative_slots, process_cascade
 from backend.websocket_manager import manager
 from backend.qr_service import generate_signed_token, verify_signed_token, generate_qr_data_url
+from backend.notifications import notification_service
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
@@ -32,6 +33,7 @@ class BookingModifyRequest(BaseModel):
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_booking(
     req: BookingCreateRequest,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
     if req.start_time >= req.end_time:
@@ -108,6 +110,23 @@ async def create_booking(
     # Broadcast event
     await manager.broadcast("booking_created", new_booking.model_dump())
 
+    # Send confirmation email in background
+    user = session.get(User, req.user_id)
+    unit = session.get(Equipment, req.unit_id)
+    user_email = user.email if user else f"{req.user_id}@campus.edu"
+    background_tasks.add_task(
+        notification_service.send_booking_confirmed,
+        user_email=user_email,
+        user_name=req.user_name,
+        booking_id=new_booking.id,
+        unit_name=unit.name if unit else req.unit_id,
+        unit_number=unit.unit_number if unit else "",
+        start_time=new_booking.start_time,
+        end_time=new_booking.end_time,
+        purpose=new_booking.purpose,
+        qr_token=new_booking.qr_token
+    )
+
     return new_booking
 
 @router.patch("/{booking_id}")
@@ -161,11 +180,15 @@ async def modify_booking(
 @router.delete("/{booking_id}")
 async def cancel_booking(
     booking_id: str,
+    background_tasks: BackgroundTasks,
     session: Session = Depends(get_session)
 ):
     booking = session.get(Booking, booking_id)
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
+
+    unit = session.get(Equipment, booking.unit_id)
+    cancelled_user = session.get(User, booking.user_id)
 
     lock = get_unit_lock(booking.unit_id)
     async with lock:
@@ -195,6 +218,36 @@ async def cancel_booking(
     await manager.broadcast("booking_cancelled", {"booking_id": booking_id, "unit_id": booking.unit_id})
     if hold:
         await manager.broadcast("hold_assigned", hold.model_dump())
+
+    # Send cancellation email to booking owner
+    cancelled_email = cancelled_user.email if cancelled_user else f"{booking.user_id}@campus.edu"
+    background_tasks.add_task(
+        notification_service.send_booking_cancelled,
+        user_email=cancelled_email,
+        user_name=booking.user_name,
+        booking_id=booking.id,
+        unit_name=unit.name if unit else booking.unit_id,
+        unit_number=unit.unit_number if unit else "",
+        start_time=booking.start_time,
+        end_time=booking.end_time,
+        reason="Cancelled by user"
+    )
+
+    # If hold was awarded to waitlisted candidate, notify them with 10-minute deadline & link
+    if hold and promoted_candidate:
+        cand_user = session.get(User, promoted_candidate.user_id)
+        cand_email = cand_user.email if cand_user else f"{promoted_candidate.user_id}@campus.edu"
+        background_tasks.add_task(
+            notification_service.send_hold_awarded,
+            user_email=cand_email,
+            user_name=promoted_candidate.user_name,
+            hold_id=hold.id,
+            unit_name=unit.name if unit else hold.unit_id,
+            unit_number=unit.unit_number if unit else "",
+            start_time=hold.start_time,
+            end_time=hold.end_time,
+            expires_at=hold.expires_at
+        )
 
     return {
         "status": "cancelled",

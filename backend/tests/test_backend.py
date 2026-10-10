@@ -6,7 +6,7 @@ from sqlmodel import create_engine, SQLModel, Session, select
 from backend.main import app
 from backend.database import get_session
 import backend.database as db_module
-from backend.models import Booking, HoldEntry, WaitlistEntry, Equipment, MaintenanceRecord
+from backend.models import Booking, HoldEntry, WaitlistEntry, Equipment, MaintenanceRecord, User
 
 TEST_DB_URL = "sqlite:///test_zeroclash.db"
 test_engine = create_engine(TEST_DB_URL, connect_args={"check_same_thread": False})
@@ -352,4 +352,357 @@ async def test_no_show_auto_release_and_reliability_penalty():
         assert overdue_booking.status == "cancelled"
         assert user.no_show_count == 1
         assert user.reliability_score == 85
+
+@pytest.mark.asyncio
+async def test_notification_service_provider_interface():
+    """
+    Verifies that the notification provider interface formats and dispatches all 6 required alert types:
+    confirmed, cancelled, hold awarded (with 10m deadline + link), hold expired, maintenance cancellation, and 30m reminder.
+    """
+    from backend.notifications import ConsoleNotificationProvider, NotificationService
+
+    provider = ConsoleNotificationProvider()
+    service = NotificationService(provider=provider)
+
+    now = datetime.now(timezone.utc)
+
+    # 1. Booking confirmed
+    ok1 = service.send_booking_confirmed(
+        user_email="alex@campus.edu",
+        user_name="Alex M.",
+        booking_id="bk-test-1",
+        unit_name="DSLR Camera",
+        unit_number="#01",
+        start_time=now,
+        end_time=now + timedelta(hours=2),
+        purpose="Project Video",
+        qr_token="bk-test-1:1700:hmac"
+    )
+    assert ok1 is True
+    assert len(provider.sent_messages) == 1
+    assert "Confirmed" in provider.sent_messages[-1]["subject"]
+    assert "DSLR Camera" in provider.sent_messages[-1]["body_text"]
+
+    # 2. Booking cancelled
+    ok2 = service.send_booking_cancelled(
+        user_email="alex@campus.edu",
+        user_name="Alex M.",
+        booking_id="bk-test-1",
+        unit_name="DSLR Camera",
+        unit_number="#01",
+        start_time=now,
+        end_time=now + timedelta(hours=2),
+        reason="Reschedule requested"
+    )
+    assert ok2 is True
+    assert "Cancelled" in provider.sent_messages[-1]["subject"]
+
+    # 3. Provisional hold awarded (must include 10-minute deadline and confirm link)
+    deadline = now + timedelta(minutes=10)
+    ok3 = service.send_hold_awarded(
+        user_email="e.reed@campus.edu",
+        user_name="Dr. Evelyn Reed",
+        hold_id="hld-test-1",
+        unit_name="GPU Compute Node",
+        unit_number="#08",
+        start_time=now,
+        end_time=now + timedelta(hours=3),
+        expires_at=deadline,
+        confirm_url="http://localhost:5173/holds/hld-test-1/confirm"
+    )
+    assert ok3 is True
+    last_msg = provider.sent_messages[-1]
+    assert "10-Minute Hold" in last_msg["subject"]
+    assert "10-MINUTE WINDOW" in last_msg["body_text"]
+    assert "http://localhost:5173/holds/hld-test-1/confirm" in last_msg["body_text"]
+
+    # 4. Hold expired
+    ok4 = service.send_hold_expired(
+        user_email="e.reed@campus.edu",
+        user_name="Dr. Evelyn Reed",
+        hold_id="hld-test-1",
+        unit_name="GPU Compute Node",
+        unit_number="#08"
+    )
+    assert ok4 is True
+    assert "Hold Expired" in provider.sent_messages[-1]["subject"]
+
+    # 5. Maintenance cancellation
+    ok5 = service.send_maintenance_cancellation(
+        user_email="alex@campus.edu",
+        user_name="Alex M.",
+        booking_id="bk-test-2",
+        unit_name="3D Printer",
+        unit_number="#02",
+        start_time=now,
+        end_time=now + timedelta(hours=1),
+        maint_reason="Emergency Extruder Replacement"
+    )
+    assert ok5 is True
+    assert "Maintenance" in provider.sent_messages[-1]["subject"]
+    assert "Emergency Extruder Replacement" in provider.sent_messages[-1]["body_text"]
+
+    # 6. Reminder 30 minutes before slot
+    ok6 = service.send_reminder_30m(
+        user_email="alex@campus.edu",
+        user_name="Alex M.",
+        booking_id="bk-test-3",
+        unit_name="VR Headset",
+        unit_number="#03",
+        start_time=now + timedelta(minutes=30),
+        end_time=now + timedelta(minutes=90)
+    )
+    assert ok6 is True
+    assert "30 minutes" in provider.sent_messages[-1]["subject"]
+
+@pytest.mark.asyncio
+async def test_booking_endpoints_dispatch_background_emails():
+    """
+    Verifies that POST /bookings and DELETE /bookings trigger background email tasks
+    without blocking the response.
+    """
+    from backend.notifications import notification_service, ConsoleNotificationProvider
+
+    # Ensure provider is Console provider and clear messages
+    if not isinstance(notification_service.provider, ConsoleNotificationProvider):
+        notification_service.provider = ConsoleNotificationProvider()
+    notification_service.provider.sent_messages.clear()
+
+    with Session(test_engine) as session:
+        if not session.get(Equipment, "eq-cam-04"):
+            session.add(Equipment(
+                id="eq-cam-04",
+                name="DSLR Camera",
+                unit_number="#04",
+                type="camera",
+                icon_url="/assets/icons/camera.png",
+                building_id="bldg-media-1",
+                building_name="Block A",
+                status="available"
+            ))
+        if not session.get(User, "usr-faculty-reed"):
+            session.add(User(
+                id="usr-faculty-reed",
+                name="Dr. Evelyn Reed",
+                role="Faculty",
+                email="e.reed@campus.edu",
+                department="Physics",
+                no_show_count=0,
+                reliability_score=100
+            ))
+        if not session.get(User, "usr-student-alex"):
+            session.add(User(
+                id="usr-student-alex",
+                name="Alex M.",
+                role="Student",
+                email="alex.m@campus.edu",
+                department="Computer Science",
+                no_show_count=0,
+                reliability_score=100
+            ))
+        session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        start_time = datetime.now(timezone.utc) + timedelta(days=5, hours=10)
+        end_time = start_time + timedelta(hours=2)
+
+        # 1. Create booking -> should trigger booking confirmed email
+        res_book = await client.post("/bookings", json={
+            "unit_id": "eq-cam-04",
+            "user_id": "usr-student-alex",
+            "user_name": "Alex M.",
+            "user_role": "Student",
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "purpose": "Camera field test"
+        })
+        assert res_book.status_code == 201
+        booking_id = res_book.json()["id"]
+
+        # Let background task complete
+        await asyncio.sleep(0.05)
+
+        confirmed_emails = [m for m in notification_service.provider.sent_messages if "Booking Confirmed" in m["subject"]]
+        assert len(confirmed_emails) >= 1
+        assert "Camera field test" in confirmed_emails[-1]["body_text"]
+
+        # 2. Add waitlisted student for the same slot
+        res_wl = await client.post("/waitlist", json={
+            "unit_id": "eq-cam-04",
+            "user_id": "usr-faculty-reed",
+            "user_name": "Dr. Evelyn Reed",
+            "user_role": "Faculty",
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "urgency": "high",
+            "purpose": "High-speed lab capture"
+        })
+        assert res_wl.status_code == 201
+
+        # 3. Cancel booking -> triggers cancellation email + hold awarded email to Dr. Evelyn Reed
+        res_cancel = await client.delete(f"/bookings/{booking_id}")
+        assert res_cancel.status_code == 200
+
+        await asyncio.sleep(0.05)
+
+        cancelled_emails = [m for m in notification_service.provider.sent_messages if "Booking Cancelled" in m["subject"]]
+        assert len(cancelled_emails) >= 1
+
+        hold_emails = [m for m in notification_service.provider.sent_messages if "Hold Awarded" in m["subject"]]
+        assert len(hold_emails) >= 1
+        assert "e.reed@campus.edu" in hold_emails[-1]["to_email"]
+        assert "10-MINUTE WINDOW" in hold_emails[-1]["body_text"]
+
+@pytest.mark.asyncio
+async def test_maintenance_cancellation_email_dispatch():
+    """
+    Verifies that admin maintenance toggles trigger background maintenance cancellation emails.
+    """
+    from backend.notifications import notification_service, ConsoleNotificationProvider
+
+    if not isinstance(notification_service.provider, ConsoleNotificationProvider):
+        notification_service.provider = ConsoleNotificationProvider()
+    notification_service.provider.sent_messages.clear()
+
+    with Session(test_engine) as session:
+        if not session.get(Equipment, "eq-vr-02"):
+            session.add(Equipment(
+                id="eq-vr-02",
+                name="VR Headset",
+                unit_number="#05",
+                type="vr",
+                icon_url="/assets/icons/vr.png",
+                building_id="bldg-media-2",
+                building_name="Block B",
+                status="available"
+            ))
+        if not session.get(User, "usr-student-marcus"):
+            session.add(User(
+                id="usr-student-marcus",
+                name="Marcus Vance",
+                role="Student",
+                email="m.vance@campus.edu",
+                department="Design",
+                no_show_count=0,
+                reliability_score=100
+            ))
+        session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        start_time = datetime.now(timezone.utc) + timedelta(days=6, hours=14)
+        end_time = start_time + timedelta(hours=2)
+
+        # Create booking
+        res_book = await client.post("/bookings", json={
+            "unit_id": "eq-vr-02",
+            "user_id": "usr-student-marcus",
+            "user_name": "Marcus Vance",
+            "user_role": "Student",
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "purpose": "VR Prototyping"
+        })
+        assert res_book.status_code == 201
+        bk_id = res_book.json()["id"]
+
+        # Admin enables maintenance
+        res_maint = await client.post("/admin/maintenance", json={
+            "unit_id": "eq-vr-02",
+            "is_active": True,
+            "reason": "Firmware GPU update and calibration",
+            "expected_return_time": (end_time + timedelta(hours=5)).isoformat()
+        })
+        assert res_maint.status_code == 200
+
+        await asyncio.sleep(0.05)
+
+        maint_emails = [m for m in notification_service.provider.sent_messages if "Maintenance" in m["subject"]]
+        assert len(maint_emails) >= 1
+        assert "Firmware GPU update and calibration" in maint_emails[-1]["body_text"]
+        assert "m.vance@campus.edu" in maint_emails[-1]["to_email"]
+
+@pytest.mark.asyncio
+async def test_30m_booking_reminder_dispatch():
+    """
+    Verifies that upcoming active bookings (within 30 minutes of start) receive
+    a reminder email and are marked reminder_sent=True.
+    """
+    from backend.notifications import notification_service, ConsoleNotificationProvider
+
+    if not isinstance(notification_service.provider, ConsoleNotificationProvider):
+        notification_service.provider = ConsoleNotificationProvider()
+    notification_service.provider.sent_messages.clear()
+
+    now = datetime.now(timezone.utc)
+    slot_start = now + timedelta(minutes=20)
+    slot_end = slot_start + timedelta(hours=1)
+
+    with Session(test_engine) as session:
+        # Seed test user and booking
+        if not session.get(User, "usr-remind-alex"):
+            session.add(User(
+                id="usr-remind-alex",
+                name="Alex M.",
+                role="Student",
+                email="alex.m@campus.edu",
+                department="Computer Science",
+                no_show_count=0,
+                reliability_score=100
+            ))
+
+        booking = Booking(
+            id="bk-remind-test",
+            unit_id="eq-cam-01",
+            user_id="usr-remind-alex",
+            user_name="Alex M.",
+            user_role="Student",
+            start_time=slot_start,
+            end_time=slot_end,
+            purpose="Studio Photography",
+            status="active",
+            reminder_sent=False
+        )
+        session.add(booking)
+        session.commit()
+
+        # Execute 30m reminder scanner logic
+        reminder_window = now + timedelta(minutes=30)
+        stmt = select(Booking).where(
+            Booking.status == "active",
+            Booking.reminder_sent == False,
+            Booking.start_time >= now,
+            Booking.start_time <= reminder_window
+        )
+        upcoming = session.exec(stmt).all()
+        assert len(upcoming) >= 1
+
+        for ub in upcoming:
+            ub.reminder_sent = True
+            session.add(ub)
+            session.commit()
+
+            u_user = session.get(User, ub.user_id)
+            u_unit = session.get(Equipment, ub.unit_id)
+            notification_service.send_reminder_30m(
+                user_email=u_user.email if u_user else f"{ub.user_id}@campus.edu",
+                user_name=ub.user_name,
+                booking_id=ub.id,
+                unit_name=u_unit.name if u_unit else ub.unit_id,
+                unit_number=u_unit.unit_number if u_unit else "",
+                start_time=ub.start_time,
+                end_time=ub.end_time
+            )
+
+        # Verify email sent
+        reminder_emails = [m for m in notification_service.provider.sent_messages if "30 minutes" in m["subject"]]
+        assert len(reminder_emails) == 1
+        assert "Studio Photography" not in reminder_emails[0]["subject"]
+        assert "alex.m@campus.edu" in reminder_emails[0]["to_email"]
+
+        # Verify second pass sends nothing (idempotent)
+        second_pass = session.exec(stmt).all()
+        assert len(second_pass) == 0
+
 
