@@ -1,0 +1,58 @@
+{
+  "name": "campus-map-export-dependencies",
+  "version": "1.0.0",
+  "description": "Dependencies required to run the 3D Campus Map hero module",
+  "recommendedStack": {
+    "reactVersion": "19.x",
+    "notes": "Tested and validated with React 19 and R3F v9 on Vite 6 / React 19.",
+    "dependencies": {
+      "@react-three/drei": "^10.0.3",
+      "@react-three/fiber": "^9.1.2",
+      "@react-three/postprocessing": "^3.0.4",
+      "lucide-react": "^0.477.0",
+      "postprocessing": "^6.36.7",
+      "react": "^19.0.0",
+      "react-dom": "^19.0.0",
+      "three": "^0.174.0",
+      "zustand": "^5.0.3"
+    },
+    "devDependencies": {
+      "@types/react": "^19.0.10",
+      "@types/react-dom": "^19.0.4",
+      "@types/three": "^0.174.0",
+      "autoprefixer": "^10.4.20",
+      "postcss": "^8.5.3",
+      "tailwindcss": "^3.4.17",
+      "typescript": "^5.7.3"
+    }
+  },
+  "react18AlternativeStack": {
+    "reactVersion": "18.x",
+    "notes": "If the host project is using React 18, use R3F v8 and drei v9. The JSX and Canvas props in this module are identical and require NO code modifications.",
+    "dependencies": {
+      "@react-three/drei": "^9.121.4",
+      "@react-three/fiber": "^8.17.10",
+      "@react-three/postprocessing": "^2.16.2",
+      "lucide-react": "^0.477.0",
+      "postprocessing": "^6.35.3",
+      "react": "^18.3.1",
+      "react-dom": "^18.3.1",
+      "three": "^0.164.1",
+      "zustand": "^4.5.5"
+    },
+    "devDependencies": {
+      "@types/react": "^18.3.12",
+      "@types/react-dom": "^18.3.1",
+      "@types/three": "^0.164.1",
+      "autoprefixer": "^10.4.20",
+      "postcss": "^8.5.3",
+      "tailwindcss": "^3.4.17",
+      "typescript": "^5.7.3"
+    },
+    "codeChangesRequired": "None. R3F 8 and drei 9 support all components used (Canvas, OrbitControls, Html, EffectComposer, Bloom)."
+  },
+  "installCommands": {
+    "npm_react19": "npm install three @react-three/fiber @react-three/drei @react-three/postprocessing postprocessing zustand lucide-react && npm install -D @types/three tailwindcss autoprefixer postcss",
+    "npm_react18": "npm install three@^0.164.1 @react-three/fiber@^8.17.10 @react-three/drei@^9.121.4 @react-three/postprocessing@^2.16.2 postprocessing@^6.35.3 zustand@^4.5.5 lucide-react && npm install -D @types/three@^0.164.1 tailwindcss autoprefixer postcss"
+  }
+}

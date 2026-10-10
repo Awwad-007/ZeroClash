@@ -4,9 +4,9 @@ from sqlmodel import Session, select
 from datetime import datetime, timezone
 import uuid
 
-from backend.database import get_session
+from backend.database import get_session, is_postgres_session
 from backend.models import WaitlistEntry, HoldEntry, Booking, AuditLog, User, Equipment
-from backend.engine import calculate_priority_score
+from backend.engine import calculate_priority_score, get_unit_lock
 from backend.websocket_manager import manager
 from backend.qr_service import generate_signed_token
 from backend.notifications import notification_service
@@ -72,9 +72,14 @@ async def confirm_provisional_hold(
     if hold.expired or hold.confirmed:
         raise HTTPException(status_code=400, detail="Hold is expired or already confirmed")
 
-    # Mark hold confirmed
-    hold.confirmed = True
-    session.add(hold)
+    lock = get_unit_lock(hold.unit_id)
+    async with lock:
+        if is_postgres_session(session):
+            session.exec(select(Equipment).where(Equipment.id == hold.unit_id).with_for_update()).first()
+
+        # Mark hold confirmed
+        hold.confirmed = True
+        session.add(hold)
 
     # Promote waitlist entry
     if hold.waitlist_entry_id:

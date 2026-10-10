@@ -1,0 +1,115 @@
+/* ==========================================================================
+   Campus Map Custom Styles
+   Includes Glassmorphism primitives, Sci-Fi HUD brackets, and Pin bobbing.
+   Both default and 'cm-' namespaced classes are provided for safe integration.
+   ========================================================================== */
+
+/* 1. Glassmorphism Panels */
+.glass-panel,
+.cm-glass-panel {
+  background: rgba(11, 20, 36, 0.78);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(56, 189, 248, 0.22);
+  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.45);
+}
+
+.glass-panel-highlight,
+.cm-glass-panel-highlight {
+  background: rgba(13, 26, 48, 0.88);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  box-shadow: 0 0 25px rgba(0, 229, 255, 0.15), 0 8px 32px 0 rgba(0, 0, 0, 0.55);
+}
+
+/* 2. Sci-Fi Bracket Frame (Hero Header HUD) */
+.scifi-bracket-frame,
+.cm-scifi-bracket-frame {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 36px;
+  background: linear-gradient(180deg, rgba(8, 20, 38, 0.85) 0%, rgba(4, 11, 22, 0.95) 100%);
+  border-top: 1px solid rgba(56, 189, 248, 0.6);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+  clip-path: polygon(
+    14px 0%, 
+    calc(100% - 14px) 0%, 
+    100% 14px, 
+    100% calc(100% - 14px), 
+    calc(100% - 14px) 100%, 
+    14px 100%, 
+    0% calc(100% - 14px), 
+    0% 14px
+  );
+}
+
+.scifi-bracket-frame::before,
+.cm-scifi-bracket-frame::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 10px;
+  height: 2px;
+  background: #00f0ff;
+  box-shadow: 0 0 8px #00f0ff;
+}
+
+.scifi-bracket-frame::after,
+.cm-scifi-bracket-frame::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  right: 0;
+  width: 10px;
+  height: 2px;
+  background: #00f0ff;
+  box-shadow: 0 0 8px #00f0ff;
+}
+
+/* 3. Floating Bobbing Animations for 3D HTML Pins */
+@keyframes floatBob {
+  0%, 100% {
+    transform: translateY(0px);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+.pin-bob,
+.cm-pin-bob {
+  animation: floatBob 3.2s ease-in-out infinite;
+}
+
+.pin-bob-offset-1,
+.cm-pin-bob-offset-1 {
+  animation: floatBob 3.4s ease-in-out infinite 0.4s;
+}
+
+.pin-bob-offset-2,
+.cm-pin-bob-offset-2 {
+  animation: floatBob 3.1s ease-in-out infinite 0.8s;
+}
+
+/* 4. Scrollbar styling */
+.cm-scrollable::-webkit-scrollbar,
+.glass-panel-highlight::-webkit-scrollbar {
+  width: 6px;
+}
+.cm-scrollable::-webkit-scrollbar-track,
+.glass-panel-highlight::-webkit-scrollbar-track {
+  background: #050B14;
+}
+.cm-scrollable::-webkit-scrollbar-thumb,
+.glass-panel-highlight::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 3px;
+}
+.cm-scrollable::-webkit-scrollbar-thumb:hover,
+.glass-panel-highlight::-webkit-scrollbar-thumb:hover {
+  background: #0284c7;
+}

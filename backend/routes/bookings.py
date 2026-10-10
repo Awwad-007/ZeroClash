@@ -7,7 +7,7 @@ from typing import Optional
 import uuid
 import asyncio
 
-from backend.database import get_session
+from backend.database import get_session, is_postgres_session
 from backend.models import Booking, MaintenanceRecord, AuditLog, User, Equipment
 from backend.engine import get_unit_lock, find_alternative_slots, process_cascade
 from backend.websocket_manager import manager
@@ -45,6 +45,11 @@ async def create_booking(
         # Simulate micro processing latency to ensure serializability test coverage
         await asyncio.sleep(0.01)
 
+        use_pg_locks = is_postgres_session(session)
+        if use_pg_locks:
+            # Row lock on the parent equipment unit row prevents concurrent transactions from modifying or booking simultaneously
+            session.exec(select(Equipment).where(Equipment.id == req.unit_id).with_for_update()).first()
+
         # 1. Overlap query against active bookings on this equipment
         clash_stmt = select(Booking).where(
             Booking.unit_id == req.unit_id,
@@ -52,6 +57,9 @@ async def create_booking(
             Booking.start_time < req.end_time,
             Booking.end_time > req.start_time
         )
+        if use_pg_locks:
+            clash_stmt = clash_stmt.with_for_update()
+
         conflicting = session.exec(clash_stmt).all()
 
         # 2. Check active maintenance
@@ -153,6 +161,10 @@ async def modify_booking(
 
     lock = get_unit_lock(booking.unit_id)
     async with lock:
+        use_pg_locks = is_postgres_session(session)
+        if use_pg_locks:
+            session.exec(select(Equipment).where(Equipment.id == booking.unit_id).with_for_update()).first()
+
         # Atomic overlap check excluding self
         clash_stmt = select(Booking).where(
             Booking.unit_id == booking.unit_id,
@@ -161,6 +173,9 @@ async def modify_booking(
             Booking.start_time < req.end_time,
             Booking.end_time > req.start_time
         )
+        if use_pg_locks:
+            clash_stmt = clash_stmt.with_for_update()
+
         conflicts = session.exec(clash_stmt).all()
 
         if conflicts:

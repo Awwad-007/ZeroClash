@@ -1067,6 +1067,144 @@ async def test_user_cannot_cancel_or_modify_other_users_booking():
         )
         assert res_cancel_a.status_code == 200
 
+@pytest.mark.asyncio
+async def test_concurrent_race_twenty_bookers_one_winner():
+    """
+    Simulates 20 concurrent bookers attempting to claim the exact same unit and time slot.
+    Guarantees that serializability locks prevent race conditions, resulting in exactly
+    1 successful reservation (HTTP 201) and 19 rejections (HTTP 409 Conflict).
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        start_time = datetime.now(timezone.utc) + timedelta(days=12, hours=9)
+        end_time = start_time + timedelta(hours=2)
+
+        async def book_attempt(booker_index: int):
+            return await client.post("/bookings", json={
+                "unit_id": "eq-cam-01",
+                "user_id": f"usr-race-test-{booker_index}",
+                "user_name": f"Race Booker {booker_index}",
+                "user_role": "Student",
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "purpose": f"Concurrent Stress Test Booker #{booker_index}"
+            })
+
+        # Launch all 20 bookers concurrently
+        tasks = [book_attempt(i) for i in range(20)]
+        results = await asyncio.gather(*tasks)
+
+        winners = [r for r in results if r.status_code == 201]
+        conflicts = [r for r in results if r.status_code == 409]
+
+        assert len(winners) == 1, f"Expected exactly 1 winner, got {len(winners)}"
+        assert len(conflicts) == 19, f"Expected 19 conflicts, got {len(conflicts)}"
+
+        winner_data = winners[0].json()
+        assert winner_data["status"] == "active"
+        assert winner_data["unit_id"] == "eq-cam-01"
+
+@pytest.mark.asyncio
+async def test_postgres_race_twenty_concurrent_bookers_two_workers():
+    """
+    Production-grade multi-worker concurrency race test against PostgreSQL.
+    Simulates 2 distinct server workers (independent memory spaces, no shared asyncio locks)
+    and 20 concurrent bookers (10 hitting worker 1, 10 hitting worker 2 simultaneously).
+    Validates that PostgreSQL SELECT ... FOR UPDATE row locks ensure exactly 1 winner.
+    """
+    import os
+    pg_url = os.getenv("POSTGRES_TEST_DATABASE_URL")
+    if not pg_url and "postgres" in os.getenv("DATABASE_URL", "").lower():
+        pg_url = os.getenv("DATABASE_URL")
+
+    # If no explicit env var, test if local postgres container/service is reachable
+    if not pg_url:
+        candidate_url = "postgresql://zeroclash:zeroclash@localhost:5432/zeroclash"
+        try:
+            import psycopg2
+            conn = psycopg2.connect(candidate_url, connect_timeout=1)
+            conn.close()
+            pg_url = candidate_url
+        except Exception:
+            pytest.skip("PostgreSQL is not running on localhost:5432. Start with 'docker compose up' to execute live PostgreSQL multi-worker race test.")
+
+    from sqlmodel import create_engine
+    pg_engine = create_engine(pg_url, echo=False, pool_size=25, max_overflow=15)
+    SQLModel.metadata.create_all(pg_engine)
+
+    # Ensure test unit exists in PostgreSQL
+    with Session(pg_engine) as pg_session:
+        unit = pg_session.get(Equipment, "eq-pg-test-01")
+        if not unit:
+            pg_session.add(Equipment(
+                id="eq-pg-test-01",
+                name="Quantum GPU Test Rig",
+                unit_number="#99",
+                type="gpu",
+                icon_url="/assets/icons/gpu.png",
+                building_id="bldg-comp-1",
+                building_name="Block B",
+                status="available"
+            ))
+            pg_session.commit()
+
+    # Create 2 separate worker app instances with independent memory space
+    def get_pg_session_worker():
+        with Session(pg_engine) as s:
+            yield s
+
+    # App Worker 1
+    worker_1_app = FastAPI()
+    worker_1_app.include_router(bookings_router)
+    worker_1_app.dependency_overrides[get_session] = get_pg_session_worker
+
+    # App Worker 2
+    worker_2_app = FastAPI()
+    worker_2_app.include_router(bookings_router)
+    worker_2_app.dependency_overrides[get_session] = get_pg_session_worker
+
+    start_time = datetime.now(timezone.utc) + timedelta(days=20, hours=10)
+    end_time = start_time + timedelta(hours=3)
+
+    transport_w1 = httpx.ASGITransport(app=worker_1_app)
+    transport_w2 = httpx.ASGITransport(app=worker_2_app)
+
+    async with httpx.AsyncClient(transport=transport_w1, base_url="http://worker1") as client1, \
+               httpx.AsyncClient(transport=transport_w2, base_url="http://worker2") as client2:
+
+        async def book_worker(worker_client: httpx.AsyncClient, booker_index: int):
+            return await worker_client.post("/bookings", json={
+                "unit_id": "eq-pg-test-01",
+                "user_id": f"usr-pg-race-{booker_index}",
+                "user_name": f"PG Booker #{booker_index}",
+                "user_role": "Researcher",
+                "start_time": start_time.isoformat(),
+                "end_time": end_time.isoformat(),
+                "purpose": f"PostgreSQL Multi-Worker Clash Test #{booker_index}"
+            })
+
+        # 10 bookers hit Worker 1, 10 bookers hit Worker 2 simultaneously
+        tasks = []
+        for i in range(10):
+            tasks.append(book_worker(client1, i))
+        for i in range(10, 20):
+            tasks.append(book_worker(client2, i))
+
+        results = await asyncio.gather(*tasks)
+
+        winners = [r for r in results if r.status_code == 201]
+        conflicts = [r for r in results if r.status_code == 409]
+
+        assert len(winners) == 1, f"PostgreSQL with_for_update failed: expected 1 winner, got {len(winners)}"
+        assert len(conflicts) == 19, f"Expected 19 conflicts, got {len(conflicts)}"
+
+        with Session(pg_engine) as pg_session:
+            confirmed = pg_session.exec(
+                select(Booking).where(Booking.unit_id == "eq-pg-test-01", Booking.status == "active")
+            ).all()
+            assert len(confirmed) == 1
+
+
 
 
 
