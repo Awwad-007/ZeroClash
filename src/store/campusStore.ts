@@ -119,6 +119,9 @@ interface CampusState {
   joinWaitlist: (params: Omit<JoinWaitlistParams, 'userId' | 'userName' | 'userRole'>) => Promise<WaitlistEntry>;
   confirmHold: (holdId: string) => Promise<Booking>;
   setMaintenance: (unitId: string, isActive: boolean, reason?: string, expectedReturnTime?: Date) => Promise<void>;
+  getBookingQR: (bookingId: string) => Promise<{ bookingId: string; token: string; qrDataUrl: string }>;
+  checkInBooking: (bookingId: string, qrToken?: string) => Promise<Booking>;
+  checkOutBooking: (bookingId: string) => Promise<Booking>;
   refreshState: () => void;
 }
 
@@ -158,6 +161,34 @@ export const useCampusStore = create<CampusState>((set, get) => {
       const cancelledId = event.data.booking_id || event.data.bookingId;
       set((state) => ({
         bookings: state.bookings.map((b) => (b.id === cancelledId ? { ...b, status: 'cancelled' } : b)),
+      }));
+      refreshState();
+    } else if (event.event === 'booking_checked_in' && event.data) {
+      const checkedInId = event.data.booking_id || event.data.bookingId;
+      set((state) => ({
+        bookings: state.bookings.map((b) =>
+          b.id === checkedInId
+            ? {
+                ...b,
+                status: 'in_use',
+                checkedInAt: event.data.checked_in_at ? new Date(event.data.checked_in_at) : new Date(),
+              }
+            : b
+        ),
+      }));
+      refreshState();
+    } else if (event.event === 'booking_checked_out' && event.data) {
+      const checkedOutId = event.data.booking_id || event.data.bookingId;
+      set((state) => ({
+        bookings: state.bookings.map((b) =>
+          b.id === checkedOutId
+            ? {
+                ...b,
+                status: 'completed',
+                checkedOutAt: event.data.checked_out_at ? new Date(event.data.checked_out_at) : new Date(),
+              }
+            : b
+        ),
       }));
       refreshState();
     } else if (event.event === 'maintenance_changed' || event.event === 'maintenance_updated') {
@@ -558,6 +589,66 @@ export const useCampusStore = create<CampusState>((set, get) => {
       const unit = equipment[unitId];
       if (unit) {
         triggerBuildingPulse(unit.buildingId);
+      }
+    },
+
+    getBookingQR: async (bookingId: string) => {
+      return await dataSource.getBookingQR(bookingId);
+    },
+
+    checkInBooking: async (bookingId: string, qrToken?: string) => {
+      const { refreshState, addToast, equipment, triggerBuildingPulse } = get();
+      try {
+        const updated = await dataSource.checkInBooking(bookingId, qrToken);
+        set((state) => ({
+          bookings: state.bookings.map((b) => (b.id === bookingId ? updated : b)),
+        }));
+        refreshState();
+        const unit = equipment[updated.unitId];
+        if (unit) {
+          triggerBuildingPulse(unit.buildingId);
+        }
+        addToast({
+          type: 'success',
+          title: 'Checked In Successfully',
+          message: `Session for ${unit?.name || 'unit'} is now IN USE. Enjoy your slot!`,
+        });
+        return updated;
+      } catch (err: any) {
+        addToast({
+          type: 'error',
+          title: 'Check-in Denied',
+          message: err.message || 'Check-in is only allowed between 10m before start and 15m after.',
+        });
+        throw err;
+      }
+    },
+
+    checkOutBooking: async (bookingId: string) => {
+      const { refreshState, addToast, equipment, triggerBuildingPulse } = get();
+      try {
+        const updated = await dataSource.checkOutBooking(bookingId);
+        set((state) => ({
+          bookings: state.bookings.map((b) => (b.id === bookingId ? updated : b)),
+        }));
+        refreshState();
+        const unit = equipment[updated.unitId];
+        if (unit) {
+          triggerBuildingPulse(unit.buildingId);
+        }
+        addToast({
+          type: 'info',
+          title: 'Checked Out',
+          message: `Session for ${unit?.name || 'unit'} completed. Any remaining time has been returned to campus inventory.`,
+        });
+        return updated;
+      } catch (err: any) {
+        addToast({
+          type: 'error',
+          title: 'Check-out Failed',
+          message: err.message || 'Failed to complete session check-out.',
+        });
+        throw err;
       }
     },
   };

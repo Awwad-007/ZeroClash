@@ -1,7 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { useCampusStore } from '../store/campusStore';
 import { User, UserRole } from '../types';
-import { UserCheck, ChevronDown, Shield, BookOpen, Sparkles, Calendar } from 'lucide-react';
+import { UserCheck, ChevronDown, Shield, BookOpen, Sparkles, Calendar, QrCode } from 'lucide-react';
+import { QRScannerModal } from './QRScannerModal';
 
 export const UserSwitcher: React.FC = () => {
   const currentUser = useCampusStore((s) => s.currentUser);
@@ -13,6 +14,7 @@ export const UserSwitcher: React.FC = () => {
   const setIsMyBookingsOpen = useCampusStore((s) => s.setIsMyBookingsOpen);
 
   const [isOpen, setIsOpen] = useState(false);
+  const [isScannerOpen, setIsScannerOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
   // Active bookings count for current user
@@ -72,6 +74,16 @@ export const UserSwitcher: React.FC = () => {
             !
           </span>
         )}
+      </button>
+
+      {/* Staff QR Scanner Button */}
+      <button
+        onClick={() => setIsScannerOpen(true)}
+        className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-slate-900/80 hover:bg-slate-800 text-slate-200 border border-cyan-500/30 hover:border-cyan-400 transition shadow-[0_0_15px_rgba(0,240,255,0.15)] active:scale-95 cursor-pointer"
+        title="Open QR Scanner (Lab Staff / Admin Check-in)"
+      >
+        <QrCode className="w-3.5 h-3.5 text-cyan-400" />
+        <span className="hidden sm:inline">Scan QR</span>
       </button>
 
       {/* User Switcher Dropdown */}
@@ -140,6 +152,9 @@ export const UserSwitcher: React.FC = () => {
           </div>
         )}
       </div>
+
+      {/* Staff QR Scanner Modal */}
+      <QRScannerModal isOpen={isScannerOpen} onClose={() => setIsScannerOpen(false)} />
     </div>
   );
 };

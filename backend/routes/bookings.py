@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel
 from sqlmodel import Session, select
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 import uuid
 import asyncio
@@ -11,6 +11,7 @@ from backend.database import get_session
 from backend.models import Booking, MaintenanceRecord, AuditLog
 from backend.engine import get_unit_lock, find_alternative_slots, process_cascade
 from backend.websocket_manager import manager
+from backend.qr_service import generate_signed_token, verify_signed_token, generate_qr_data_url
 
 router = APIRouter(prefix="/bookings", tags=["Bookings"])
 
@@ -73,8 +74,12 @@ async def create_booking(
                 })
             )
 
+        booking_id = f"bk-{uuid.uuid4().hex[:8]}"
+        expiry_ts = int(req.end_time.timestamp())
+        qr_token = generate_signed_token(booking_id, expiry_ts)
+
         new_booking = Booking(
-            id=f"bk-{uuid.uuid4().hex[:8]}",
+            id=booking_id,
             unit_id=req.unit_id,
             user_id=req.user_id,
             user_name=req.user_name,
@@ -83,6 +88,7 @@ async def create_booking(
             end_time=req.end_time,
             purpose=req.purpose,
             status="active",
+            qr_token=qr_token,
             created_at=datetime.now(timezone.utc)
         )
         session.add(new_booking)
@@ -196,3 +202,121 @@ async def cancel_booking(
         "cascade_result": message,
         "promoted_user": promoted_candidate.user_name if promoted_candidate else None
     }
+
+class CheckInRequest(BaseModel):
+    token: Optional[str] = None
+    user_id: Optional[str] = None
+
+class CheckOutRequest(BaseModel):
+    user_id: Optional[str] = None
+
+@router.get("/{booking_id}/qr")
+async def get_booking_qr(booking_id: str, session: Session = Depends(get_session)):
+    booking = session.get(Booking, booking_id)
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    if not booking.qr_token:
+        expiry_ts = int(booking.end_time.timestamp())
+        booking.qr_token = generate_signed_token(booking.id, expiry_ts)
+        session.add(booking)
+        session.commit()
+        session.refresh(booking)
+
+    qr_url = generate_qr_data_url(booking.qr_token)
+    return {
+        "booking_id": booking.id,
+        "token": booking.qr_token,
+        "qr_data_url": qr_url
+    }
+
+@router.post("/{booking_id}/check-in")
+async def check_in_booking(
+    booking_id: str,
+    req: Optional[CheckInRequest] = None,
+    session: Session = Depends(get_session)
+):
+    booking = session.get(Booking, booking_id)
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    if req and req.token:
+        is_valid, token_b_id, err_msg = verify_signed_token(req.token)
+        if not is_valid or token_b_id != booking_id:
+            raise HTTPException(status_code=400, detail=f"Invalid QR check-in token: {err_msg or 'ID mismatch'}")
+
+    now = datetime.now(timezone.utc)
+    start = booking.start_time
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+
+    min_window = start - timedelta(minutes=10)
+    max_window = start + timedelta(minutes=15)
+
+    if now < min_window:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Check-in opens 10 minutes prior to session start ({min_window.strftime('%H:%M:%S UTC')})"
+        )
+    if now > max_window:
+        raise HTTPException(
+            status_code=400,
+            detail="Check-in window expired (+15 min past start). Slot released."
+        )
+
+    if booking.status not in ("active", "in_use"):
+        raise HTTPException(status_code=400, detail=f"Cannot check in to {booking.status} booking")
+
+    booking.checked_in_at = now
+    booking.status = "in_use"
+    session.add(booking)
+
+    audit = AuditLog(
+        id=f"log-{uuid.uuid4().hex[:8]}",
+        action="CHECK_IN",
+        target_id=booking.id,
+        details=f"User {booking.user_name} checked in via QR pass for unit {booking.unit_id}.",
+        timestamp=now,
+        user_id=req.user_id if (req and req.user_id) else booking.user_id
+    )
+    session.add(audit)
+    session.commit()
+    session.refresh(booking)
+
+    await manager.broadcast("booking_checked_in", booking.model_dump())
+    return booking
+
+@router.post("/{booking_id}/check-out")
+async def check_out_booking(
+    booking_id: str,
+    req: Optional[CheckOutRequest] = None,
+    session: Session = Depends(get_session)
+):
+    booking = session.get(Booking, booking_id)
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+
+    now = datetime.now(timezone.utc)
+    booking.checked_out_at = now
+    booking.status = "completed"
+    session.add(booking)
+
+    # If checked out early, cascade remaining slot to waitlist if applicable
+    if now < booking.end_time - timedelta(minutes=15):
+        process_cascade(session, booking.unit_id, now, booking.end_time, now)
+
+    audit = AuditLog(
+        id=f"log-{uuid.uuid4().hex[:8]}",
+        action="CHECK_OUT",
+        target_id=booking.id,
+        details=f"User {booking.user_name} checked out early/completed for unit {booking.unit_id}.",
+        timestamp=now,
+        user_id=req.user_id if (req and req.user_id) else booking.user_id
+    )
+    session.add(audit)
+    session.commit()
+    session.refresh(booking)
+
+    await manager.broadcast("booking_checked_out", booking.model_dump())
+    return booking
+

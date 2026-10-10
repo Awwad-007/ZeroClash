@@ -196,4 +196,20 @@ export class LocalEngineSource implements DataSource {
     this.emit('maintenance_updated', { unitId, isActive, record: rec });
     return rec;
   }
+
+  async getBookingQR(bookingId: string): Promise<{ bookingId: string; token: string; qrDataUrl: string }> {
+    return this.engine.getBookingQR(bookingId);
+  }
+
+  async checkInBooking(bookingId: string, token?: string): Promise<Booking> {
+    const booking = this.engine.checkIn(bookingId, token);
+    this.emit('booking_checked_in', booking);
+    return booking;
+  }
+
+  async checkOutBooking(bookingId: string): Promise<Booking> {
+    const booking = this.engine.checkOut(bookingId);
+    this.emit('booking_checked_out', booking);
+    return booking;
+  }
 }

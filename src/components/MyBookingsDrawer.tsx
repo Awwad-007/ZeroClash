@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { useCampusStore } from '../store/campusStore';
 import { Booking } from '../types';
-import { X, Calendar, Clock, AlertCircle, Edit2, Trash2, Check, ArrowRight, ShieldCheck } from 'lucide-react';
+import { X, Calendar, Clock, AlertCircle, Edit2, Trash2, Check, ArrowRight, ShieldCheck, QrCode, LogIn, LogOut } from 'lucide-react';
+import { QRPassModal } from './QRPassModal';
 
 export const MyBookingsDrawer: React.FC = () => {
   const isMyBookingsOpen = useCampusStore((s) => s.isMyBookingsOpen);
@@ -13,8 +14,11 @@ export const MyBookingsDrawer: React.FC = () => {
   const cancelBooking = useCampusStore((s) => s.cancelBooking);
   const modifyBooking = useCampusStore((s) => s.modifyBooking);
   const confirmHold = useCampusStore((s) => s.confirmHold);
+  const checkInBooking = useCampusStore((s) => s.checkInBooking);
+  const checkOutBooking = useCampusStore((s) => s.checkOutBooking);
 
   const [editingBookingId, setEditingBookingId] = useState<string | null>(null);
+  const [selectedQRBooking, setSelectedQRBooking] = useState<Booking | null>(null);
   const [modifyStartHour, setModifyStartHour] = useState<string>('14:00');
   const [modifyEndHour, setModifyEndHour] = useState<string>('16:00');
   const [modifyError, setModifyError] = useState<string | null>(null);
@@ -34,8 +38,8 @@ export const MyBookingsDrawer: React.FC = () => {
 
   // Filter bookings for current user
   const userBookings = bookings.filter((b) => b.userId === currentUser.id);
-  const activeBookings = userBookings.filter((b) => b.status === 'active');
-  const pastBookings = userBookings.filter((b) => b.status !== 'active');
+  const activeBookings = userBookings.filter((b) => b.status === 'active' || b.status === 'in_use');
+  const pastBookings = userBookings.filter((b) => b.status !== 'active' && b.status !== 'in_use');
 
   // Filter holds for current user
   const userHolds = holds.filter((h) => h.userId === currentUser.id && !h.expired && !h.confirmed);
@@ -168,9 +172,16 @@ export const MyBookingsDrawer: React.FC = () => {
                       </h4>
                       <p className="text-[11px] text-slate-400 font-mono">{unit?.buildingName}</p>
                     </div>
-                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                      Confirmed
-                    </span>
+                    {b.status === 'in_use' ? (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 flex items-center space-x-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                        <span>IN USE</span>
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-cyan-500/20 text-cyan-300 border border-cyan-500/40">
+                        CONFIRMED
+                      </span>
+                    )}
                   </div>
 
                   {/* Purpose */}
@@ -254,6 +265,35 @@ export const MyBookingsDrawer: React.FC = () => {
                       </div>
                     </div>
                   )}
+
+                  {/* Action Bar: View QR Pass & Check In / Out */}
+                  <div className="mt-3 pt-3 border-t border-slate-800/80 flex items-center justify-between">
+                    <button
+                      onClick={() => setSelectedQRBooking(b)}
+                      className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-cyan-950/80 border border-cyan-500/30 text-cyan-300 hover:text-white hover:border-cyan-400 text-xs font-mono transition shadow-sm active:scale-95 cursor-pointer"
+                    >
+                      <QrCode className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>View QR Pass</span>
+                    </button>
+
+                    {b.status === 'in_use' ? (
+                      <button
+                        onClick={() => checkOutBooking(b.id)}
+                        className="flex items-center space-x-1 px-3 py-1 rounded-lg bg-amber-400 hover:bg-amber-300 text-slate-950 text-xs font-semibold transition active:scale-95 shadow-sm cursor-pointer"
+                      >
+                        <LogOut className="w-3.5 h-3.5" />
+                        <span>Check Out</span>
+                      </button>
+                    ) : (
+                      <button
+                        onClick={() => checkInBooking(b.id, b.qrToken)}
+                        className="flex items-center space-x-1 px-3 py-1 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-xs font-semibold transition active:scale-95 shadow-sm cursor-pointer"
+                      >
+                        <LogIn className="w-3.5 h-3.5" />
+                        <span>Check In</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               );
             })
@@ -280,6 +320,13 @@ export const MyBookingsDrawer: React.FC = () => {
           )}
         </div>
       </div>
+
+      {/* Digital QR Pass Modal */}
+      <QRPassModal
+        booking={selectedQRBooking}
+        isOpen={Boolean(selectedQRBooking)}
+        onClose={() => setSelectedQRBooking(null)}
+      />
     </div>
   );
 };

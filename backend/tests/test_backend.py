@@ -224,3 +224,132 @@ async def test_maintenance_auto_cancels_future_bookings():
         })
         assert res_blocked.status_code == 409
         assert "maintenance" in res_blocked.json()["detail"]["error"].lower()
+
+@pytest.mark.asyncio
+async def test_qr_generation_check_in_and_check_out():
+    """
+    Verifies that a booking generates an HMAC signed QR code,
+    allows check-in within window (-10m to +15m), and check-out.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create booking starting in 5 minutes (within -10m window)
+        start_time = datetime.now(timezone.utc) + timedelta(minutes=5)
+        end_time = start_time + timedelta(hours=1)
+
+        res_book = await client.post("/bookings", json={
+            "unit_id": "eq-cam-01",
+            "user_id": "usr-student-alex",
+            "user_name": "Alex M.",
+            "user_role": "Student",
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "purpose": "Field Photography Session"
+        })
+        assert res_book.status_code == 201
+        booking_id = res_book.json()["id"]
+
+        # Fetch QR pass
+        res_qr = await client.get(f"/bookings/{booking_id}/qr")
+        assert res_qr.status_code == 200
+        qr_data = res_qr.json()
+        assert "token" in qr_data
+        assert "qr_data_url" in qr_data
+        assert qr_data["qr_data_url"].startswith("data:image/png;base64,")
+        token = qr_data["token"]
+
+        # Check in with QR token
+        res_checkin = await client.post(f"/bookings/{booking_id}/check-in", json={
+            "token": token,
+            "user_id": "usr-student-alex"
+        })
+        assert res_checkin.status_code == 200
+        assert res_checkin.json()["status"] == "in_use"
+        assert res_checkin.json()["checked_in_at"] is not None
+
+        # Check out
+        res_checkout = await client.post(f"/bookings/{booking_id}/check-out", json={
+            "user_id": "usr-student-alex"
+        })
+        assert res_checkout.status_code == 200
+        assert res_checkout.json()["status"] == "completed"
+        assert res_checkout.json()["checked_out_at"] is not None
+
+@pytest.mark.asyncio
+async def test_check_in_window_restriction():
+    """
+    Verifies that checking in earlier than 10 minutes prior to session is rejected.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Booking starts tomorrow
+        start_time = datetime.now(timezone.utc) + timedelta(hours=24)
+        end_time = start_time + timedelta(hours=2)
+
+        res_book = await client.post("/bookings", json={
+            "unit_id": "eq-cam-02",
+            "user_id": "usr-student-alex",
+            "user_name": "Alex M.",
+            "user_role": "Student",
+            "start_time": start_time.isoformat(),
+            "end_time": end_time.isoformat(),
+            "purpose": "Future booking check-in test"
+        })
+        assert res_book.status_code == 201
+        booking_id = res_book.json()["id"]
+
+        # Attempt premature check-in
+        res_checkin = await client.post(f"/bookings/{booking_id}/check-in", json={})
+        assert res_checkin.status_code == 400
+        assert "10 minutes" in res_checkin.json()["detail"].lower()
+
+@pytest.mark.asyncio
+async def test_no_show_auto_release_and_reliability_penalty():
+    """
+    Verifies that overdue bookings without check-in (>15m past start)
+    are auto-released, user reliability score is penalized, and slot cascades.
+    """
+    from backend.engine import process_no_show_releases
+    from backend.models import User
+
+    now = datetime.now(timezone.utc)
+    with Session(test_engine) as session:
+        # Seed test user
+        user = User(
+            id="usr-noshow-test",
+            name="NoShow User",
+            role="Student",
+            email="noshow@campus.edu",
+            department="Physics",
+            no_show_count=0,
+            reliability_score=100
+        )
+        session.add(user)
+
+        # Booking started 25 minutes ago, never checked in
+        overdue_booking = Booking(
+            id="bk-overdue-test",
+            unit_id="eq-vr-01",
+            user_id=user.id,
+            user_name=user.name,
+            user_role=user.role,
+            start_time=now - timedelta(minutes=25),
+            end_time=now + timedelta(hours=1),
+            purpose="Overdue VR simulation",
+            status="active"
+        )
+        session.add(overdue_booking)
+        session.commit()
+
+        # Run no-show release
+        released = process_no_show_releases(session, now)
+        assert len(released) >= 1
+        assert released[0][0].id == "bk-overdue-test"
+
+        # Verify penalties
+        session.refresh(user)
+        session.refresh(overdue_booking)
+        assert overdue_booking.status == "cancelled"
+        assert user.no_show_count == 1
+        assert user.reliability_score == 85
+

@@ -59,9 +59,9 @@ export function checkAvailability(
       hasOverlap(requestedSlot, { start: m.startedAt, end: m.expectedReturnTime })
   );
 
-  // 2. Check bookings conflict (only active bookings on the same unit, excluding any specified ID)
+  // 2. Check bookings conflict (active or in_use bookings on the same unit, excluding any specified ID)
   const unitBookings = activeBookings.filter(
-    (b) => b.unitId === unitId && b.status === 'active' && b.id !== excludeBookingId
+    (b) => b.unitId === unitId && (b.status === 'active' || b.status === 'in_use') && b.id !== excludeBookingId
   );
 
   const conflictingBookings = unitBookings.filter((b) =>

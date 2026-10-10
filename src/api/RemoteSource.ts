@@ -113,6 +113,9 @@ export class RemoteSource implements DataSource {
       endTime: new Date(raw.end_time),
       purpose: raw.purpose,
       status: raw.status,
+      checkedInAt: raw.checked_in_at ? new Date(raw.checked_in_at) : undefined,
+      checkedOutAt: raw.checked_out_at ? new Date(raw.checked_out_at) : undefined,
+      qrToken: raw.qr_token || undefined,
       createdAt: new Date(raw.created_at || Date.now()),
     };
   }
@@ -408,5 +411,44 @@ export class RemoteSource implements DataSource {
     }
 
     return null;
+  }
+
+  async getBookingQR(bookingId: string): Promise<{ bookingId: string; token: string; qrDataUrl: string }> {
+    const res = await fetch(`${this.apiBase}/bookings/${bookingId}/qr`);
+    if (!res.ok) throw new Error('Failed to retrieve QR pass');
+    const data = await res.json();
+    return {
+      bookingId: data.booking_id,
+      token: data.token,
+      qrDataUrl: data.qr_data_url,
+    };
+  }
+
+  async checkInBooking(bookingId: string, token?: string): Promise<Booking> {
+    const res = await fetch(`${this.apiBase}/bookings/${bookingId}/check-in`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Check-in failed' }));
+      throw new Error(err.detail || 'Check-in failed');
+    }
+    const data = await res.json();
+    return this.mapBooking(data);
+  }
+
+  async checkOutBooking(bookingId: string): Promise<Booking> {
+    const res = await fetch(`${this.apiBase}/bookings/${bookingId}/check-out`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: 'Check-out failed' }));
+      throw new Error(err.detail || 'Check-out failed');
+    }
+    const data = await res.json();
+    return this.mapBooking(data);
   }
 }

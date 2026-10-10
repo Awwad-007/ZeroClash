@@ -346,4 +346,141 @@ describe('ZeroClash Conflict Engine', () => {
       ).rejects.toThrow(/maintenance/i);
     });
   });
+
+  describe('QR Check-in, Check-out, and No-Show Releases', () => {
+    let engine: BookingEngine;
+
+    beforeEach(() => {
+      engine = new BookingEngine({
+        bookings: [],
+        waitlist: [],
+        holds: [],
+        maintenance: [],
+        auditLogs: [],
+      });
+    });
+
+    it('generates a signed QR token upon booking creation', async () => {
+      const b = await engine.createBooking({
+        unitId: 'eq-gpu-01',
+        userId: 'usr-1',
+        userName: 'Elena Rostova',
+        userRole: 'Researcher',
+        startTime: makeTime(10),
+        endTime: makeTime(12),
+        purpose: 'LLM Fine-Tuning',
+      });
+
+      expect(b.qrToken).toBeDefined();
+      expect(b.qrToken).toContain(b.id);
+
+      const qr = engine.getBookingQR(b.id);
+      expect(qr.bookingId).toBe(b.id);
+      expect(qr.token).toBe(b.qrToken);
+      expect(qr.qrDataUrl).toContain('data:image/svg+xml');
+    });
+
+    it('allows check-in strictly within the -10m to +15m window', async () => {
+      const b = await engine.createBooking({
+        unitId: 'eq-gpu-01',
+        userId: 'usr-1',
+        userName: 'Elena Rostova',
+        userRole: 'Researcher',
+        startTime: makeTime(10),
+        endTime: makeTime(12),
+        purpose: 'LLM Fine-Tuning',
+      });
+
+      // 1. Too early (15m before start) -> reject
+      const tooEarlyTime = new Date(makeTime(9, 45));
+      expect(() => engine.checkIn(b.id, b.qrToken, tooEarlyTime)).toThrow(/Check-in opens 10 minutes prior/);
+
+      // 2. Too late (20m after start) -> reject
+      const tooLateTime = new Date(makeTime(10, 20));
+      expect(() => engine.checkIn(b.id, b.qrToken, tooLateTime)).toThrow(/Check-in window expired/);
+
+      // 3. Valid check-in window (5m before start) -> accept
+      const validTime = new Date(makeTime(9, 55));
+      const checkedIn = engine.checkIn(b.id, b.qrToken, validTime);
+      expect(checkedIn.status).toBe('in_use');
+      expect(checkedIn.checkedInAt).toBe(validTime);
+
+      // Audit log recorded
+      const checkInLog = engine.getAuditLogs().find((l) => l.action === 'CHECK_IN');
+      expect(checkInLog).toBeDefined();
+      expect(checkInLog?.targetId).toBe(b.id);
+    });
+
+    it('processes check-out and completes session', async () => {
+      const b = await engine.createBooking({
+        unitId: 'eq-gpu-01',
+        userId: 'usr-1',
+        userName: 'Elena Rostova',
+        userRole: 'Researcher',
+        startTime: makeTime(10),
+        endTime: makeTime(12),
+        purpose: 'LLM Fine-Tuning',
+      });
+
+      engine.checkIn(b.id, b.qrToken, makeTime(10, 5));
+      const checkOutTime = makeTime(11, 45);
+      const checkedOut = engine.checkOut(b.id, checkOutTime);
+
+      expect(checkedOut.status).toBe('completed');
+      expect(checkedOut.checkedOutAt).toBe(checkOutTime);
+
+      const checkOutLog = engine.getAuditLogs().find((l) => l.action === 'CHECK_OUT');
+      expect(checkOutLog).toBeDefined();
+    });
+
+    it('auto-releases no-shows, applies reliability penalty, and cascades slot', async () => {
+      // 1. Create booking that will be overdue
+      const b = await engine.createBooking({
+        unitId: 'eq-gpu-01',
+        userId: 'usr-noshow',
+        userName: 'No-Show User',
+        userRole: 'Student',
+        startTime: makeTime(10),
+        endTime: makeTime(12),
+        purpose: 'Ghost Session',
+      });
+
+      // 2. Add waitlisted user
+      engine.joinWaitlist({
+        unitId: 'eq-gpu-01',
+        userId: 'usr-waiter',
+        userName: 'Waiting User',
+        userRole: 'Faculty',
+        startTime: makeTime(10),
+        endTime: makeTime(12),
+        urgency: 'high',
+        purpose: 'Urgent Work',
+      });
+
+      const mockUsers = [
+        { id: 'usr-noshow', name: 'No-Show User', noShowCount: 0, reliabilityScore: 100 },
+        { id: 'usr-waiter', name: 'Waiting User', noShowCount: 0, reliabilityScore: 100 },
+      ];
+
+      // Simulate clock at 10:20 (20 minutes past start, >15m cutoff)
+      const testClock = makeTime(10, 20);
+      const { releasedBookings } = engine.processNoShows(testClock, mockUsers);
+
+      expect(releasedBookings).toHaveLength(1);
+      expect(releasedBookings[0].id).toBe(b.id);
+      expect(releasedBookings[0].status).toBe('cancelled');
+
+      // User reliability penalized
+      expect(mockUsers[0].noShowCount).toBe(1);
+      expect(mockUsers[0].reliabilityScore).toBe(85);
+
+      // Waitlist cascade triggered -> hold created for waiting faculty
+      expect(engine.getHolds()).toHaveLength(1);
+      expect(engine.getHolds()[0].userId).toBe('usr-waiter');
+
+      // Audit log recorded
+      const noShowLog = engine.getAuditLogs().find((l) => l.action === 'NO_SHOW_RELEASE');
+      expect(noShowLog).toBeDefined();
+    });
+  });
 });

@@ -10,7 +10,7 @@ export interface User {
   reliabilityScore: number; // 0 - 100
 }
 
-export type BookingStatus = 'active' | 'cancelled' | 'completed';
+export type BookingStatus = 'active' | 'cancelled' | 'completed' | 'in_use';
 
 export interface TimeSlot {
   start: Date;
@@ -27,6 +27,9 @@ export interface Booking {
   endTime: Date;
   purpose: string;
   status: BookingStatus;
+  checkedInAt?: Date;
+  checkedOutAt?: Date;
+  qrToken?: string;
   createdAt: Date;
 }
 
@@ -123,7 +126,7 @@ export interface Building {
 
 export interface AuditLogEntry {
   id: string;
-  action: 'CREATE_BOOKING' | 'CANCEL_BOOKING' | 'MODIFY_BOOKING' | 'WAITLIST_HOLD' | 'HOLD_CONFIRMED' | 'HOLD_EXPIRED' | 'SET_MAINTENANCE' | 'CLEAR_MAINTENANCE';
+  action: 'CREATE_BOOKING' | 'CANCEL_BOOKING' | 'MODIFY_BOOKING' | 'WAITLIST_HOLD' | 'HOLD_CONFIRMED' | 'HOLD_EXPIRED' | 'SET_MAINTENANCE' | 'CLEAR_MAINTENANCE' | 'CHECK_IN' | 'CHECK_OUT' | 'NO_SHOW_RELEASE';
   targetId: string;
   details: string;
   timestamp: Date;

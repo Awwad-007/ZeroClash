@@ -8,7 +8,7 @@ import asyncio
 from backend.config import CORS_ORIGINS
 from backend.database import create_db_and_tables, engine
 from backend.models import HoldEntry, WaitlistEntry
-from backend.engine import process_cascade
+from backend.engine import process_cascade, process_no_show_releases
 from backend.websocket_manager import manager
 
 from backend.routes.equipment import router as equipment_router
@@ -60,6 +60,13 @@ async def hold_expiry_loop():
                     await manager.broadcast("hold_expired", {"hold_id": hold.id, "unit_id": hold.unit_id})
                     if next_hold:
                         await manager.broadcast("hold_assigned", next_hold.model_dump())
+
+                # Check for no-show check-in releases (+15m past start time)
+                released = process_no_show_releases(session, now)
+                for bk, promoted, hold in released:
+                    await manager.broadcast("booking_cancelled", {"booking_id": bk.id, "unit_id": bk.unit_id, "reason": "no_show"})
+                    if hold:
+                        await manager.broadcast("hold_assigned", hold.model_dump())
 
         except asyncio.CancelledError:
             break

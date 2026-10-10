@@ -2,7 +2,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 from sqlmodel import Session, select
 from sqlalchemy import text
-from backend.models import Booking, MaintenanceRecord, WaitlistEntry, HoldEntry, AuditLog
+from backend.models import Booking, MaintenanceRecord, WaitlistEntry, HoldEntry, AuditLog, User
 import uuid
 import asyncio
 
@@ -162,3 +162,53 @@ def process_cascade(
     session.commit()
 
     return top, new_hold, f"Slot reassigned to {top.user_name} (10-minute provisional hold active)"
+
+def process_no_show_releases(
+    session: Session,
+    current_time: Optional[datetime] = None
+) -> List[Tuple[Booking, Optional[WaitlistEntry], Optional[HoldEntry]]]:
+    """
+    Checks for bookings where start_time + 15 minutes has passed and user has not checked in.
+    Releases slot, increases user's no-show count, and triggers waitlist cascade.
+    """
+    if current_time is None:
+        current_time = datetime.now(timezone.utc)
+
+    cutoff = current_time - timedelta(minutes=15)
+    stmt = select(Booking).where(
+        Booking.status == "active",
+        Booking.checked_in_at == None,
+        Booking.start_time < cutoff
+    )
+    overdue_bookings = session.exec(stmt).all()
+    results = []
+
+    for bk in overdue_bookings:
+        bk.status = "cancelled"
+        session.add(bk)
+
+        # Penalize user
+        user = session.get(User, bk.user_id)
+        if user:
+            user.no_show_count += 1
+            user.reliability_score = max(0, 100 - user.no_show_count * 15)
+            session.add(user)
+
+        # Trigger cascade for the released slot
+        promoted, hold, msg = process_cascade(session, bk.unit_id, bk.start_time, bk.end_time, current_time)
+
+        audit = AuditLog(
+            id=f"log-{uuid.uuid4().hex[:8]}",
+            action="NO_SHOW_RELEASE",
+            target_id=bk.id,
+            details=f"Auto-released due to missing check-in past +15m window. Penalty applied to {bk.user_name} (no_shows={user.no_show_count if user else 1}).",
+            timestamp=current_time,
+            user_id=bk.user_id
+        )
+        session.add(audit)
+        session.commit()
+        session.refresh(bk)
+        results.append((bk, promoted, hold))
+
+    return results
+

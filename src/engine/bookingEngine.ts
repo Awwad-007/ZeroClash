@@ -120,8 +120,10 @@ export class BookingEngine {
         );
       }
 
+      const bookingId = `bk-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
+      const expiryTs = Math.floor(params.endTime.getTime() / 1000);
       const newBooking: Booking = {
-        id: `bk-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+        id: bookingId,
         unitId: params.unitId,
         userId: params.userId,
         userName: params.userName,
@@ -130,6 +132,7 @@ export class BookingEngine {
         endTime: params.endTime,
         purpose: params.purpose,
         status: 'active',
+        qrToken: `${bookingId}:${expiryTs}:hmac_local_token`,
         createdAt: new Date(),
       };
 
@@ -161,7 +164,7 @@ export class BookingEngine {
     if (!booking) {
       throw new Error(`Booking ${bookingId} not found`);
     }
-    if (booking.status !== 'active') {
+    if (booking.status !== 'active' && booking.status !== 'in_use') {
       throw new Error(`Booking ${bookingId} is already ${booking.status}`);
     }
 
@@ -262,6 +265,148 @@ export class BookingEngine {
     } finally {
       release();
     }
+  }
+
+  /**
+   * Retrieves or computes a signed QR token string for a booking.
+   */
+  getBookingQR(bookingId: string): { bookingId: string; token: string; qrDataUrl: string } {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) throw new Error('Booking not found');
+    const token = booking.qrToken || `${booking.id}:${Math.floor(booking.endTime.getTime() / 1000)}:signed_local`;
+    booking.qrToken = token;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ffffff"/><text x="100" y="100" font-family="monospace" font-size="10" text-anchor="middle" fill="#000000">${booking.id}</text></svg>`;
+    const qrDataUrl = `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+    return {
+      bookingId: booking.id,
+      token,
+      qrDataUrl,
+    };
+  }
+
+  private triggerCascade(unitId: string, startTime: Date, endTime: Date, currentTime: Date = new Date()): void {
+    const releasedSlot: TimeSlot = { start: startTime, end: endTime };
+    const cascadeResult = processWaitlistCascade(
+      unitId,
+      releasedSlot,
+      this.waitlist,
+      this.holds,
+      currentTime
+    );
+    this.waitlist = cascadeResult.updatedWaitlist;
+    if (cascadeResult.newHold) {
+      this.holds.push(cascadeResult.newHold);
+      this.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        action: 'WAITLIST_HOLD',
+        targetId: cascadeResult.newHold.id,
+        details: `Freed slot held for ${cascadeResult.candidatePromoted?.userName} (Priority: ${cascadeResult.candidatePromoted?.priorityScore})`,
+        timestamp: currentTime,
+        userId: 'system',
+      });
+    }
+  }
+
+  /**
+   * Validates and executes check-in for a booking.
+   * Allowed ONLY between 10 minutes before start time and 15 minutes after start time.
+   */
+  checkIn(bookingId: string, _token?: string, currentTime: Date = new Date(), checkedInBy: string = 'self'): Booking {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) throw new Error('Booking not found');
+
+    const minWindow = new Date(booking.startTime.getTime() - 10 * 60 * 1000);
+    const maxWindow = new Date(booking.startTime.getTime() + 15 * 60 * 1000);
+
+    if (currentTime.getTime() < minWindow.getTime()) {
+      throw new Error(`Check-in opens 10 minutes prior to session start (${minWindow.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`);
+    }
+    if (currentTime.getTime() > maxWindow.getTime()) {
+      throw new Error('Check-in window expired (+15 min past start). Slot was released.');
+    }
+    if (booking.status === 'cancelled') {
+      throw new Error('Cannot check in to a cancelled reservation');
+    }
+
+    booking.checkedInAt = currentTime;
+    booking.status = 'in_use';
+
+    this.auditLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: 'CHECK_IN',
+      targetId: booking.id,
+      details: `User ${booking.userName} checked in via QR pass for unit ${booking.unitId}`,
+      timestamp: currentTime,
+      userId: checkedInBy,
+    });
+
+    return booking;
+  }
+
+  /**
+   * Executes session check-out.
+   */
+  checkOut(bookingId: string, currentTime: Date = new Date(), checkedOutBy: string = 'self'): Booking {
+    const booking = this.bookings.find((b) => b.id === bookingId);
+    if (!booking) throw new Error('Booking not found');
+
+    booking.checkedOutAt = currentTime;
+    booking.status = 'completed';
+
+    // If checked out early, cascade remaining slot to waitlisted users
+    if (currentTime.getTime() < booking.endTime.getTime() - 15 * 60 * 1000) {
+      this.triggerCascade(booking.unitId, currentTime, booking.endTime, currentTime);
+    }
+
+    this.auditLogs.unshift({
+      id: `log-${Date.now()}`,
+      action: 'CHECK_OUT',
+      targetId: booking.id,
+      details: `User ${booking.userName} checked out from unit ${booking.unitId}. Session completed.`,
+      timestamp: currentTime,
+      userId: checkedOutBy,
+    });
+
+    return booking;
+  }
+
+  /**
+   * Releases active bookings where start_time + 15m has passed without check-in,
+   * penalties user no-show count & reliability, and triggers waitlist cascade.
+   */
+  processNoShows(currentTime: Date = new Date(), allUsers?: any[]): { releasedBookings: Booking[] } {
+    const cutoff = new Date(currentTime.getTime() - 15 * 60 * 1000);
+    const overdue = this.bookings.filter(
+      (b) => b.status === 'active' && !b.checkedInAt && b.startTime.getTime() < cutoff.getTime()
+    );
+
+    const released: Booking[] = [];
+
+    for (const b of overdue) {
+      b.status = 'cancelled';
+      released.push(b);
+
+      if (allUsers) {
+        const u = allUsers.find((user) => user.id === b.userId);
+        if (u) {
+          u.noShowCount = (u.noShowCount ?? 0) + 1;
+          u.reliabilityScore = Math.max(0, 100 - u.noShowCount * 15);
+        }
+      }
+
+      this.triggerCascade(b.unitId, b.startTime, b.endTime, currentTime);
+
+      this.auditLogs.unshift({
+        id: `log-${Date.now()}`,
+        action: 'NO_SHOW_RELEASE',
+        targetId: b.id,
+        details: `Auto-released due to missing check-in past +15m window. Penalty applied to ${b.userName}.`,
+        timestamp: currentTime,
+        userId: b.userId,
+      });
+    }
+
+    return { releasedBookings: released };
   }
 
   /**
@@ -496,7 +641,7 @@ export class BookingEngine {
 
     // 2. Check current in-use booking
     const activeUnitBookings = this.bookings.filter(
-      (b) => b.unitId === unit.id && b.status === 'active'
+      (b) => b.unitId === unit.id && (b.status === 'active' || b.status === 'in_use')
     );
 
     const currentBooking = activeUnitBookings.find(

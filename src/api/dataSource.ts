@@ -45,4 +45,8 @@ export interface DataSource {
   joinWaitlist(params: JoinWaitlistParams): Promise<WaitlistEntry>;
   confirmHold(holdId: string, userId: string): Promise<Booking>;
   setMaintenance(unitId: string, isActive: boolean, reason?: string, expectedReturnTime?: Date, createdBy?: string): Promise<MaintenanceRecord | null>;
+
+  getBookingQR(bookingId: string): Promise<{ bookingId: string; token: string; qrDataUrl: string }>;
+  checkInBooking(bookingId: string, token?: string): Promise<Booking>;
+  checkOutBooking(bookingId: string): Promise<Booking>;
 }
