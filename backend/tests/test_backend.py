@@ -807,5 +807,78 @@ async def test_ai_scheduling_parse_nlp():
         bad_resp = await client.post("/schedule/parse-nlp", json={"prompt": "   "})
         assert bad_resp.status_code == 400
 
+@pytest.mark.asyncio
+async def test_analytics_forecast_fallback_when_sparse_data():
+    """
+    Verifies that when database has sparse history (<35 bookings), /analytics/forecast
+    falls back cleanly to the moving average projection without throwing errors.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/analytics/forecast?lookahead_days=5")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["is_fallback"] is True
+        assert "Fallback" in data["model"]
+        assert len(data["projected_forecast"]) == 5
+        assert data["mae_held_out_week"] is None
+
+@pytest.mark.asyncio
+async def test_analytics_forecast_ml_model_with_8_weeks_history():
+    """
+    Verifies that with 8 weeks of generated booking history from seed.py,
+    the GradientBoostingRegressor trains, evaluates MAE on the held-out week,
+    and returns 95% confidence intervals on predictions.
+    """
+    from backend.seed import generate_8_weeks_historical_bookings
+    from backend.models import Equipment
+
+    # Seed equipment and 8 weeks history
+    with Session(test_engine) as session:
+        for u_id in ["eq-gpu-01", "eq-cam-01", "eq-vr-01", "eq-print-01"]:
+            if not session.get(Equipment, u_id):
+                session.add(Equipment(
+                    id=u_id,
+                    name=f"Unit {u_id}",
+                    unit_number="#01",
+                    type="gpu",
+                    icon_url="/icon.png",
+                    building_id="bldg-1",
+                    building_name="Hall",
+                    status="available"
+                ))
+        hist_bookings = generate_8_weeks_historical_bookings()
+        assert len(hist_bookings) > 100
+        session.add_all(hist_bookings)
+        session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/analytics/forecast?lookahead_days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+
+        assert data["is_fallback"] is False
+        assert "Gradient Boosting" in data["model"]
+        assert data["mae_held_out_week"] is not None
+        assert isinstance(data["mae_held_out_week"], (int, float))
+        assert data["mae_held_out_week"] >= 0.0
+        assert data["confidence_interval_pct"] == 95
+
+        forecasts = data["projected_forecast"]
+        assert len(forecasts) == 7
+        for f in forecasts:
+            assert "predicted_utilization" in f
+            assert "confidence_range" in f
+            low, high = f["confidence_range"]
+            assert low <= high
+            assert 0.0 <= low <= 100.0
+            assert 0.0 <= high <= 100.0
+            assert "peak_hour" in f
+
+        assert "kpis" in data
+        assert "model_mae" in data["kpis"]
+
+
 
 

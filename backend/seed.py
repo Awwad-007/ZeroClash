@@ -1,4 +1,5 @@
 import json
+import random
 from datetime import datetime, timezone, timedelta
 from sqlmodel import Session, select
 from backend.database import engine, create_db_and_tables
@@ -8,6 +9,99 @@ from backend.engine import calculate_priority_score
 def get_relative_date(day_offset: int, hour: int, minute: int = 0) -> datetime:
     d = datetime.now(timezone.utc) + timedelta(days=day_offset)
     return d.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+def generate_8_weeks_historical_bookings() -> list[Booking]:
+    rng = random.Random(42)  # Deterministic seed for reproducible tests and ML training
+
+    users_pool = [
+        ("usr-student-alex", "Alex M.", "Student"),
+        ("usr-faculty-reed", "Dr. Evelyn Reed", "Faculty"),
+        ("usr-researcher-devin", "Devin T.", "Researcher"),
+        ("usr-researcher-priya", "Priya S.", "Researcher"),
+        ("usr-student-sarah", "Sarah K.", "Student"),
+        ("usr-faculty-thorne", "Prof. Aris Thorne", "Faculty"),
+        ("usr-student-marcus", "Marcus Vance", "Student"),
+        ("usr-student-chloe", "Chloe Sanders", "Student"),
+        ("usr-student-liam", "Liam N.", "Student"),
+    ]
+
+    units_pool = [
+        "eq-gpu-01", "eq-cam-01", "eq-cam-02", "eq-cam-04",
+        "eq-vr-01", "eq-vr-02", "eq-vr-03", "eq-print-01",
+        "eq-proj-01", "eq-micro-02"
+    ]
+
+    purposes = [
+        "Deep Learning Diffusion Benchmark",
+        "High-Speed Motion Capture Footage",
+        "Haptic VR Teleoperation Experiment",
+        "Additive Manufacturing Structural Stress Test",
+        "Confocal Microstructure Spectrometry",
+        "Robotics Spatial SLAM Calibration",
+        "Documentary Interview B-Roll Shoot",
+        "Quantum Monte Carlo Algorithm Run",
+        "Autonomous Navigation Simulation",
+        "Biomechanics Gait Analysis Recording"
+    ]
+
+    hist_bookings: list[Booking] = []
+    base_time = datetime.now(timezone.utc)
+
+    # 8 weeks = 56 days of rich training history
+    for day_offset in range(-56, 0):
+        cur_date = base_time + timedelta(days=day_offset)
+        weekday = cur_date.weekday()
+        is_weekend = weekday >= 5
+
+        # Midterm rush boost (weeks -4 to -3)
+        midterm_boost = 1.35 if -32 <= day_offset <= -18 else 1.0
+
+        if is_weekend:
+            num_bookings = rng.randint(1, 3)
+            possible_hours = [11, 13, 15, 17]
+        else:
+            base_count = rng.randint(5, 8)
+            num_bookings = min(10, int(base_count * midterm_boost))
+            possible_hours = [9, 10, 11, 13, 14, 15, 16, 17, 18, 19]
+
+        rng.shuffle(possible_hours)
+        used_unit_hours: set[tuple[str, int]] = set()
+
+        for slot_idx in range(num_bookings):
+            if slot_idx >= len(possible_hours):
+                break
+            start_hour = possible_hours[slot_idx]
+            duration_hours = rng.choice([2, 3, 4])
+            end_hour = min(22, start_hour + duration_hours)
+            if end_hour <= start_hour:
+                continue
+
+            unit_id = rng.choice(units_pool)
+            clash_key = (unit_id, start_hour)
+            if clash_key in used_unit_hours:
+                continue
+            for h in range(start_hour, end_hour):
+                used_unit_hours.add((unit_id, h))
+
+            u_id, u_name, u_role = rng.choice(users_pool)
+            purpose = rng.choice(purposes)
+
+            start_dt = cur_date.replace(hour=start_hour, minute=0, second=0, microsecond=0)
+            end_dt = cur_date.replace(hour=end_hour, minute=0, second=0, microsecond=0)
+
+            hist_bookings.append(Booking(
+                id=f"bk-hist-d{abs(day_offset):02d}-s{slot_idx:02d}",
+                unit_id=unit_id,
+                user_id=u_id,
+                user_name=u_name,
+                user_role=u_role,
+                start_time=start_dt,
+                end_time=end_dt,
+                purpose=purpose,
+                status="completed"
+            ))
+
+    return hist_bookings
 
 def seed_database():
     create_db_and_tables()
@@ -63,7 +157,7 @@ def seed_database():
         ]
         session.add_all(equipment)
 
-        # 4. Seed Bookings
+        # 4. Seed Bookings (Active and 8-week historical)
         bookings = [
             Booking(id="bk-seed-01", unit_id="eq-gpu-01", user_id="usr-researcher-devin", user_name="Devin T.", user_role="Researcher", start_time=get_relative_date(0, 10, 0), end_time=get_relative_date(0, 17, 30), purpose="Deep Learning Diffusion Model Benchmark", status="active"),
             Booking(id="bk-seed-02", unit_id="eq-cam-02", user_id="usr-student-sarah", user_name="Sarah K.", user_role="Student", start_time=get_relative_date(0, 11, 0), end_time=get_relative_date(0, 15, 0), purpose="Design Documentary Interview B-Roll", status="active"),
@@ -77,7 +171,7 @@ def seed_database():
             Booking(id="bk-seed-10", unit_id="eq-cam-04", user_id="usr-student-sarah", user_name="Sarah K.", user_role="Student", start_time=get_relative_date(1, 10, 30), end_time=get_relative_date(1, 13, 30), purpose="Senior Capstone Short Film Scene 4", status="active"),
             Booking(id="bk-seed-11", unit_id="eq-vr-02", user_id="usr-student-liam", user_name="Liam N.", user_role="Student", start_time=get_relative_date(1, 14, 0), end_time=get_relative_date(1, 17, 0), purpose="Multi-User Spatial Telepresence Test", status="active"),
             Booking(id="bk-seed-12", unit_id="eq-print-01", user_id="usr-student-marcus", user_name="Marcus Vance", user_role="Student", start_time=get_relative_date(1, 15, 0), end_time=get_relative_date(1, 19, 0), purpose="Quadcopter Chassis Prototyping", status="active"),
-        ]
+        ] + generate_8_weeks_historical_bookings()
         session.add_all(bookings)
 
         # 5. Seed Waitlist

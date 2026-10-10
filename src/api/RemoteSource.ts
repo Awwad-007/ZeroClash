@@ -269,7 +269,22 @@ export class RemoteSource implements DataSource {
   async getForecast(lookaheadDays: number = 7): Promise<ForecastPoint[]> {
     const res = await fetch(`${this.apiBase}/analytics/forecast?lookahead_days=${lookaheadDays}`);
     if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-    return await res.json();
+    const data = await res.json();
+    if (Array.isArray(data)) return data;
+    if (data.projected_forecast && Array.isArray(data.projected_forecast)) {
+      return data.projected_forecast.map((p: any) => ({
+        day: p.day,
+        predicted_demand: p.predicted_utilization,
+        moving_avg: p.confidence_range ? p.confidence_range[0] : Math.round(p.predicted_utilization * 0.95),
+        peak_hour: p.peak_hour ?? 14,
+        status: p.predicted_utilization >= 78 ? 'High' : p.predicted_utilization >= 55 ? 'Moderate' : 'Low',
+        confidence_lower: p.confidence_range?.[0],
+        confidence_upper: p.confidence_range?.[1],
+        mae: data.mae_held_out_week,
+        model: data.model,
+      }));
+    }
+    return [];
   }
 
   async createBooking(params: CreateBookingParams): Promise<Booking> {

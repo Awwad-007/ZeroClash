@@ -25,6 +25,10 @@ export interface ForecastPoint {
   moving_avg: number;
   peak_hour: number;
   status: string;
+  confidence_lower?: number;
+  confidence_upper?: number;
+  mae?: number;
+  model?: string;
 }
 
 export interface ServerEvent {
