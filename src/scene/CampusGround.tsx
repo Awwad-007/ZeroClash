@@ -54,8 +54,7 @@ export const CampusGround: React.FC = () => {
       points.push(outerRing[i], outerRing[i + 1]);
     }
 
-    const geo = new THREE.BufferGeometry().setFromPoints(points);
-    return geo;
+    return new THREE.BufferGeometry().setFromPoints(points);
   }, []);
 
   // Floor isometric grid
@@ -68,24 +67,77 @@ export const CampusGround: React.FC = () => {
 
     for (let i = 0; i <= divisions; i++) {
       const coord = -half + i * step;
-      // Grid along X
       pts.push(new THREE.Vector3(-half, 0.005, coord), new THREE.Vector3(half, 0.005, coord));
-      // Grid along Z
       pts.push(new THREE.Vector3(coord, 0.005, -half), new THREE.Vector3(coord, 0.005, half));
     }
 
     return new THREE.BufferGeometry().setFromPoints(pts);
   }, []);
 
+  // Tree locations around the campus courtyard and plazas
+  const treePositions: [number, number, number][] = useMemo(
+    () => [
+      [-1.8, 0, -0.6],
+      [1.8, 0, 1.8],
+      [-4.0, 0, -3.8],
+      [7.2, 0, 0.8],
+      [-2.2, 0, 5.2],
+      [3.0, 0, -1.8],
+      [-1.2, 0, -4.5],
+      [5.2, 0, 2.5],
+      [-5.0, 0, 2.2],
+    ],
+    []
+  );
+
+  // Pathway bollard lamp positions
+  const lampPositions: [number, number, number][] = useMemo(
+    () => [
+      [-3.2, 0, 0.7],
+      [-1.1, 0, -2.2],
+      [3.2, 0, 0.4],
+      [0.4, 0, 3.5],
+      [1.8, 0, -1.6],
+      [-2.0, 0, 2.0],
+      [2.2, 0, 1.8],
+      [-4.8, 0, 0.6],
+      [4.2, 0, 3.5],
+    ],
+    []
+  );
+
+  // Bench positions around courtyard
+  const benchPositions: [number, number, number][] = useMemo(
+    () => [
+      [-0.8, 0, -1.5],
+      [2.2, 0, 0.8],
+      [-1.8, 0, 1.2],
+      [0.8, 0, 2.5],
+    ],
+    []
+  );
+
   return (
     <group>
-      {/* Dark background base plane */}
+      {/* 1. Dark background base plane */}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, -0.01, 0]}>
-        <planeGeometry args={[100, 100]} />
+        <planeGeometry args={[120, 120]} />
         <meshBasicMaterial color="#050B14" depthWrite={false} />
       </mesh>
 
-      {/* Isometric floor grid */}
+      {/* 2. Central Courtyard Solid Paved Plaza Base */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0.5]} receiveShadow>
+        <planeGeometry args={[11, 11]} />
+        <meshStandardMaterial color="#0b121e" roughness={0.9} />
+      </mesh>
+
+      {/* 3. Central Plaza Inner Decorative Ring */}
+      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.012, 0.5]}>
+        <ringGeometry args={[2.5, 3.6, 6]} />
+        <meshStandardMaterial color="#0e1a2b" roughness={0.8} />
+      </mesh>
+
+      {/* 4. Isometric floor grid */}
       {showGrid && (
         <lineSegments geometry={gridLinesGeometry}>
           <lineBasicMaterial
@@ -98,29 +150,69 @@ export const CampusGround: React.FC = () => {
         </lineSegments>
       )}
 
-      {/* Glowing courtyard & building pathways */}
+      {/* 5. Glowing courtyard & building pathways */}
       <lineSegments geometry={pathGeometry}>
         <lineBasicMaterial
           color="#00f0ff"
           transparent
-          opacity={0.65}
+          opacity={0.55}
           linewidth={2}
           blending={THREE.AdditiveBlending}
           depthWrite={false}
         />
       </lineSegments>
 
-      {/* Central courtyard translucent decorative polygon */}
-      <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.015, 0.5]}>
-        <ringGeometry args={[0, 3.8, 4]} />
-        <meshBasicMaterial
-          color="#00e5ff"
-          transparent
-          opacity={0.04}
-          blending={THREE.AdditiveBlending}
-          depthWrite={false}
-        />
-      </mesh>
+      {/* 6. Stylized Low-Poly Campus Trees */}
+      {treePositions.map((pos, idx) => (
+        <group key={idx} position={pos}>
+          {/* Tree Trunk */}
+          <mesh position={[0, 0.35, 0]} castShadow>
+            <cylinderGeometry args={[0.07, 0.09, 0.7, 6]} />
+            <meshStandardMaterial color="#1e293b" roughness={0.9} />
+          </mesh>
+          {/* Lower Foliage Block */}
+          <mesh position={[0, 0.85, 0]} castShadow>
+            <dodecahedronGeometry args={[0.42, 0]} />
+            <meshStandardMaterial color="#064e3b" roughness={0.7} metalness={0.1} />
+          </mesh>
+          {/* Upper Foliage Tip with subtle emissive cyber-green */}
+          <mesh position={[0, 1.25, 0]} castShadow>
+            <dodecahedronGeometry args={[0.3, 0]} />
+            <meshStandardMaterial
+              color="#059669"
+              emissive="#10b981"
+              emissiveIntensity={0.25}
+              roughness={0.6}
+            />
+          </mesh>
+        </group>
+      ))}
+
+      {/* 7. Illuminated Pathway Lamp Bollards */}
+      {lampPositions.map((pos, idx) => (
+        <group key={idx} position={pos}>
+          {/* Bollard Pole */}
+          <mesh position={[0, 0.28, 0]} castShadow>
+            <cylinderGeometry args={[0.03, 0.04, 0.56, 8]} />
+            <meshStandardMaterial color="#334155" metalness={0.8} roughness={0.3} />
+          </mesh>
+          {/* Glowing Lamp Head */}
+          <mesh position={[0, 0.58, 0]}>
+            <sphereGeometry args={[0.07, 8, 8]} />
+            <meshBasicMaterial color="#00f0ff" />
+          </mesh>
+        </group>
+      ))}
+
+      {/* 8. Courtyard Stone Benches */}
+      {benchPositions.map((pos, idx) => (
+        <group key={idx} position={pos}>
+          <mesh position={[0, 0.1, 0]} castShadow receiveShadow>
+            <boxGeometry args={[0.8, 0.18, 0.3]} />
+            <meshStandardMaterial color="#1e293b" roughness={0.7} />
+          </mesh>
+        </group>
+      ))}
     </group>
   );
 };
