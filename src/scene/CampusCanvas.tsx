@@ -1,25 +1,11 @@
-import React, { useEffect } from 'react';
+import React from 'react';
 import { Canvas } from '@react-three/fiber';
-import { OrthographicCamera } from '@react-three/drei';
 import { EffectComposer, Bloom } from '@react-three/postprocessing';
 import { CampusGround } from './CampusGround';
 import { CampusBuildings } from './CampusBuildings';
 import { EquipmentPins } from './EquipmentPins';
 import { CameraController } from './CameraController';
 import { useCampusStore } from '../store/campusStore';
-import { useThree, useFrame } from '@react-three/fiber';
-
-const DebugCameraInfo: React.FC = () => {
-  const { camera } = useThree();
-  useFrame(() => {
-    const el = document.getElementById('debug-cam-vals');
-    if (el) {
-      const ortho = camera as any;
-      el.innerText = `Cam: x=${camera.position.x.toFixed(1)} y=${camera.position.y.toFixed(1)} z=${camera.position.z.toFixed(1)} | zoom=${camera.zoom.toFixed(1)} | L=${ortho.left?.toFixed(1)} R=${ortho.right?.toFixed(1)} T=${ortho.top?.toFixed(1)} B=${ortho.bottom?.toFixed(1)}`;
-    }
-  });
-  return null;
-};
 
 export const CampusCanvas: React.FC = () => {
   const closeModal = useCampusStore((s) => s.closeModal);
