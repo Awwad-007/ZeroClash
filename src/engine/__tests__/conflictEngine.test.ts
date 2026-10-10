@@ -3,6 +3,7 @@ import { hasOverlap, checkAvailability } from '../conflict';
 import { BookingEngine } from '../bookingEngine';
 import { calculatePriorityScore, processWaitlistCascade, handleHoldExpiry } from '../waitlist';
 import { Booking, WaitlistEntry, HoldEntry } from '../../types';
+import { LocalEngineSource } from '../../api/LocalEngineSource';
 
 describe('ZeroClash Conflict Engine', () => {
   const baseDate = new Date('2026-10-10T08:00:00Z');
@@ -483,4 +484,47 @@ describe('ZeroClash Conflict Engine', () => {
       expect(noShowLog).toBeDefined();
     });
   });
+
+  describe('AI-Powered Scheduling & NLP Query Parsing', () => {
+    it('parses natural language query into structured scheduling parameters', async () => {
+      const localSource = new LocalEngineSource();
+      const parsed = await localSource.parseNaturalLanguageSchedule('I need a GPU for 3 hours on Friday afternoon');
+
+      expect(parsed.equipmentType).toBe('gpu');
+      expect(parsed.durationMinutes).toBe(180);
+      expect(parsed.earliest).toBeInstanceOf(Date);
+      expect(parsed.latest).toBeInstanceOf(Date);
+      expect(parsed.latest.getTime()).toBeGreaterThan(parsed.earliest.getTime());
+    });
+
+    it('suggests top non-overlapping slots ranked by priority and load balance', async () => {
+      const localSource = new LocalEngineSource();
+      await localSource.init();
+
+      const suggestions = await localSource.suggestSchedule({
+        equipmentType: 'gpu',
+        durationMinutes: 120,
+        daysWindow: 3,
+        userRole: 'Researcher',
+        urgency: 'high',
+      });
+
+      expect(suggestions.length).toBeGreaterThan(0);
+      expect(suggestions.length).toBeLessThanOrEqual(3);
+
+      for (const slot of suggestions) {
+        expect(slot.unitId).toBeDefined();
+        expect(slot.score).toBeGreaterThan(0);
+        expect(slot.durationMinutes).toBe(120);
+        expect(slot.demandLevel).toBeDefined();
+        expect(slot.recommendationReason).toContain('Optimal');
+      }
+
+      // Ensure suggestions are sorted descending by score
+      for (let i = 0; i < suggestions.length - 1; i++) {
+        expect(suggestions[i].score).toBeGreaterThanOrEqual(suggestions[i + 1].score);
+      }
+    });
+  });
 });
+

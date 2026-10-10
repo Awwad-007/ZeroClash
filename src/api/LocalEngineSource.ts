@@ -1,6 +1,16 @@
 import { DataSource, ConnectionStatus, HeatmapData, ForecastPoint, ServerEvent } from './dataSource';
 import { BookingEngine, CreateBookingParams, JoinWaitlistParams } from '../engine/bookingEngine';
-import { EquipmentUnit, Booking, WaitlistEntry, HoldEntry, MaintenanceRecord, AuditLogEntry } from '../types';
+import {
+  EquipmentUnit,
+  Booking,
+  WaitlistEntry,
+  HoldEntry,
+  MaintenanceRecord,
+  AuditLogEntry,
+  ScheduleSuggestion,
+  ScheduleSuggestParams,
+  ParsedScheduleIntent
+} from '../types';
 import { MOCK_EQUIPMENT } from '../data/mock';
 import { SEED_BOOKINGS, SEED_WAITLIST, SEED_MAINTENANCE } from '../data/seedData';
 
@@ -211,5 +221,108 @@ export class LocalEngineSource implements DataSource {
     const booking = this.engine.checkOut(bookingId);
     this.emit('booking_checked_out', booking);
     return booking;
+  }
+
+  async suggestSchedule(params: ScheduleSuggestParams): Promise<ScheduleSuggestion[]> {
+    const now = new Date();
+    const startWindow = params.startWindow || now;
+    const endWindow = params.endWindow || new Date(startWindow.getTime() + (params.daysWindow || 3) * 24 * 3600 * 1000);
+
+    const matchingUnits = Object.values(MOCK_EQUIPMENT).filter(
+      (u) => u.type.toLowerCase() === params.equipmentType.toLowerCase() || u.name.toLowerCase().includes(params.equipmentType.toLowerCase())
+    );
+
+    if (matchingUnits.length === 0) return [];
+
+    const durationMs = params.durationMinutes * 60 * 1000;
+    const activeBookings = this.engine.getBookings().filter((b) => b.status === 'active' || b.status === 'in_use');
+    const activeMaint = this.engine.getMaintenance().filter((m) => m.isActive);
+
+    const candidateSlots: ScheduleSuggestion[] = [];
+
+    for (const unit of matchingUnits) {
+      // Unit utilization estimate
+      const unitBookings = activeBookings.filter((b) => b.unitId === unit.id);
+      const utilization = Math.min(1, unitBookings.length * 0.25);
+
+      let cursor = new Date(startWindow);
+      const mins = cursor.getMinutes();
+      cursor.setMinutes(mins < 30 ? 30 : 60, 0, 0);
+
+      while (cursor.getTime() + durationMs <= endWindow.getTime() && candidateSlots.length < 15) {
+        const candStart = new Date(cursor);
+        const candEnd = new Date(candStart.getTime() + durationMs);
+        cursor = new Date(cursor.getTime() + 30 * 60 * 1000);
+
+        const h = candStart.getHours();
+        if (h < 8 || candEnd.getHours() > 22) continue;
+
+        const clashBk = unitBookings.some((b) => candStart.getTime() < b.endTime.getTime() && candEnd.getTime() > b.startTime.getTime());
+        if (clashBk) continue;
+
+        const clashMaint = activeMaint.some((m) => m.unitId === unit.id && candStart.getTime() < m.expectedReturnTime.getTime() && candEnd.getTime() > m.startedAt.getTime());
+        if (clashMaint) continue;
+
+        const isPeak = h >= 14 && h <= 17;
+        const demandLevel = isPeak ? 'High Peak' : h >= 10 && h <= 13 ? 'Moderate' : 'Low Congestion';
+        const score = Math.round(50 + (1 - utilization) * 30 + (isPeak ? 10 : 20));
+
+        candidateSlots.push({
+          unitId: unit.id,
+          unitName: unit.name,
+          unitNumber: unit.unitNumber,
+          buildingId: unit.buildingId,
+          buildingName: unit.buildingName,
+          startTime: candStart,
+          endTime: candEnd,
+          durationMinutes: params.durationMinutes,
+          score,
+          utilizationRate: Math.round(utilization * 100) / 100,
+          demandLevel,
+          recommendationReason: `Optimal load balancing on ${unit.name} (${Math.round((1 - utilization) * 100)}% available). ${demandLevel} slot.`,
+        });
+      }
+    }
+
+    return candidateSlots.sort((a, b) => b.score - a.score).slice(0, 3);
+  }
+
+  async parseNaturalLanguageSchedule(prompt: string): Promise<ParsedScheduleIntent> {
+    const text = prompt.toLowerCase();
+    let equipmentType = 'gpu';
+    if (text.includes('camera') || text.includes('dslr') || text.includes('canon') || text.includes('sony')) equipmentType = 'camera';
+    else if (text.includes('vr') || text.includes('headset') || text.includes('quest') || text.includes('vive')) equipmentType = 'vr';
+    else if (text.includes('printer') || text.includes('3d') || text.includes('print')) equipmentType = 'printer';
+    else if (text.includes('microscope')) equipmentType = 'microscope';
+    else if (text.includes('projector')) equipmentType = 'projector';
+
+    let durationMinutes = 120;
+    const hrMatch = text.match(/(\d+)\s*(?:hours?|hrs?|h)\b/);
+    if (hrMatch) durationMinutes = Math.min(480, Math.max(15, parseInt(hrMatch[1], 10) * 60));
+
+    const now = new Date();
+    let targetDay = new Date(now);
+    if (text.includes('tomorrow')) targetDay.setDate(targetDay.getDate() + 1);
+    else if (text.includes('friday')) {
+      const dist = (5 - now.getDay() + 7) % 7 || 7;
+      targetDay.setDate(targetDay.getDate() + dist);
+    }
+
+    let startH = 14;
+    let endH = 18;
+    if (text.includes('morning')) { startH = 9; endH = 13; }
+    else if (text.includes('evening') || text.includes('night')) { startH = 17; endH = 21; }
+
+    const earliest = new Date(targetDay);
+    earliest.setHours(startH, 0, 0, 0);
+    const latest = new Date(targetDay);
+    latest.setHours(endH, 0, 0, 0);
+
+    return {
+      equipmentType,
+      durationMinutes,
+      earliest,
+      latest,
+    };
   }
 }

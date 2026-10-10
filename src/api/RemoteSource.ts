@@ -1,6 +1,17 @@
 import { DataSource, ConnectionStatus, HeatmapData, ForecastPoint, ServerEvent } from './dataSource';
 import { CreateBookingParams, JoinWaitlistParams } from '../engine/bookingEngine';
-import { EquipmentUnit, Booking, WaitlistEntry, HoldEntry, MaintenanceRecord, AuditLogEntry, UserRole } from '../types';
+import {
+  EquipmentUnit,
+  Booking,
+  WaitlistEntry,
+  HoldEntry,
+  MaintenanceRecord,
+  AuditLogEntry,
+  UserRole,
+  ScheduleSuggestion,
+  ScheduleSuggestParams,
+  ParsedScheduleIntent
+} from '../types';
 import { MOCK_EQUIPMENT } from '../data/mock';
 
 const DEFAULT_API_BASE = 'http://localhost:8000/api';
@@ -450,5 +461,54 @@ export class RemoteSource implements DataSource {
     }
     const data = await res.json();
     return this.mapBooking(data);
+  }
+
+  async suggestSchedule(params: ScheduleSuggestParams): Promise<ScheduleSuggestion[]> {
+    const res = await fetch(`${this.apiBase}/schedule/suggest`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        equipment_type: params.equipmentType,
+        duration_minutes: params.durationMinutes,
+        start_window: params.startWindow?.toISOString(),
+        end_window: params.endWindow?.toISOString(),
+        days_window: params.daysWindow || 3,
+        user_role: params.userRole || 'Student',
+        urgency: params.urgency || 'medium',
+        user_id: params.userId,
+      }),
+    });
+    if (!res.ok) throw new Error('Failed to retrieve AI schedule suggestions');
+    const data = await res.json();
+    return (data.suggested_slots || []).map((s: any) => ({
+      unitId: s.unit_id,
+      unitName: s.unit_name,
+      unitNumber: s.unit_number,
+      buildingId: s.building_id,
+      buildingName: s.building_name,
+      startTime: new Date(s.start_time),
+      endTime: new Date(s.end_time),
+      durationMinutes: s.duration_minutes,
+      score: s.score,
+      utilizationRate: s.utilization_rate,
+      demandLevel: s.demand_level,
+      recommendationReason: s.recommendation_reason,
+    }));
+  }
+
+  async parseNaturalLanguageSchedule(prompt: string): Promise<ParsedScheduleIntent> {
+    const res = await fetch(`${this.apiBase}/schedule/parse-nlp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt }),
+    });
+    if (!res.ok) throw new Error('Failed to parse natural language scheduling prompt');
+    const data = await res.json();
+    return {
+      equipmentType: data.equipment_type,
+      durationMinutes: data.duration_minutes,
+      earliest: new Date(data.earliest),
+      latest: new Date(data.latest),
+    };
   }
 }

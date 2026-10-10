@@ -705,4 +705,107 @@ async def test_30m_booking_reminder_dispatch():
         second_pass = session.exec(stmt).all()
         assert len(second_pass) == 0
 
+@pytest.mark.asyncio
+async def test_ai_scheduling_suggest_slots_with_ortools():
+    """
+    Verifies that POST /schedule/suggest uses OR-Tools to compute the best 3 non-overlapping slots
+    ranked by priority score, unit utilization, and forecasted demand index.
+    """
+    # Seed multiple GPU units and an existing booking
+    with Session(test_engine) as session:
+        now = datetime.now(timezone.utc)
+        start_time = now + timedelta(days=2, hours=10)
+        end_time = start_time + timedelta(hours=3)
+
+        # Ensure GPU units exist
+        for unit_id, num in [("eq-gpu-01", "#01"), ("eq-gpu-02", "#02"), ("eq-gpu-03", "#03")]:
+            if not session.get(Equipment, unit_id):
+                session.add(Equipment(
+                    id=unit_id,
+                    name="GPU Compute Node",
+                    unit_number=num,
+                    type="gpu",
+                    icon_url="/assets/icons/gpu.png",
+                    building_id="bldg-comp-1",
+                    building_name="Turing Hall",
+                    status="available"
+                ))
+
+        # Add booking on eq-gpu-01 so it has higher utilization and a conflict window
+        if not session.get(Booking, "bk-gpu-block"):
+            session.add(Booking(
+                id="bk-gpu-block",
+                unit_id="eq-gpu-01",
+                user_id="usr-other",
+                user_name="Dr. Turing",
+                user_role="Faculty",
+                start_time=start_time,
+                end_time=end_time,
+                purpose="Deep Learning Training",
+                status="active"
+            ))
+        session.commit()
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        req_start = datetime.now(timezone.utc) + timedelta(days=2, hours=8)
+        req_end = req_start + timedelta(days=2)
+
+        resp = await client.post("/schedule/suggest", json={
+            "equipment_type": "gpu",
+            "duration_minutes": 120,
+            "start_window": req_start.isoformat(),
+            "end_window": req_end.isoformat(),
+            "user_role": "Researcher",
+            "urgency": "high"
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["equipment_type"] == "gpu"
+        assert "suggested_slots" in data
+        slots = data["suggested_slots"]
+        assert len(slots) <= 3
+        assert len(slots) > 0
+
+        # Verify slots structure and sanity
+        for slot in slots:
+            assert "unit_id" in slot
+            assert "score" in slot
+            assert slot["duration_minutes"] == 120
+            assert "demand_level" in slot
+            assert "recommendation_reason" in slot
+            assert slot["score"] > 0
+
+        # Assert no slot conflicts with the booked window on eq-gpu-01
+        for slot in slots:
+            if slot["unit_id"] == "eq-gpu-01":
+                slot_s = datetime.fromisoformat(slot["start_time"].replace("Z", "+00:00"))
+                slot_e = datetime.fromisoformat(slot["end_time"].replace("Z", "+00:00"))
+                # Must not overlap [start_time, end_time]
+                assert not (slot_s < end_time and slot_e > start_time), "Suggested slot clashes with existing booking"
+
+@pytest.mark.asyncio
+async def test_ai_scheduling_parse_nlp():
+    """
+    Verifies that POST /schedule/parse-nlp extracts structured parameters from natural language.
+    """
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        # Prompt: "I need a GPU for 3 hours on Friday afternoon"
+        resp = await client.post("/schedule/parse-nlp", json={
+            "prompt": "I need a GPU for 3 hours on Friday afternoon"
+        })
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["equipment_type"] == "gpu"
+        assert data["duration_minutes"] == 180
+        assert "earliest" in data
+        assert "latest" in data
+
+        # Test empty prompt rejects with 400
+        bad_resp = await client.post("/schedule/parse-nlp", json={"prompt": "   "})
+        assert bad_resp.status_code == 400
+
+
 

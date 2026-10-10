@@ -1,4 +1,14 @@
-import { EquipmentUnit, Booking, WaitlistEntry, HoldEntry, MaintenanceRecord, AuditLogEntry } from '../types';
+import {
+  EquipmentUnit,
+  Booking,
+  WaitlistEntry,
+  HoldEntry,
+  MaintenanceRecord,
+  AuditLogEntry,
+  ScheduleSuggestion,
+  ScheduleSuggestParams,
+  ParsedScheduleIntent
+} from '../types';
 import { CreateBookingParams, JoinWaitlistParams } from '../engine/bookingEngine';
 
 export type ConnectionStatus = 'connected' | 'reconnecting' | 'disconnected' | 'local';
@@ -49,4 +59,7 @@ export interface DataSource {
   getBookingQR(bookingId: string): Promise<{ bookingId: string; token: string; qrDataUrl: string }>;
   checkInBooking(bookingId: string, token?: string): Promise<Booking>;
   checkOutBooking(bookingId: string): Promise<Booking>;
+
+  suggestSchedule(params: ScheduleSuggestParams): Promise<ScheduleSuggestion[]>;
+  parseNaturalLanguageSchedule(prompt: string): Promise<ParsedScheduleIntent>;
 }

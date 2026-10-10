@@ -11,10 +11,15 @@ import {
   ChevronDown,
   Sparkles,
   Info,
+  Bot,
+  Loader2,
+  Wand2,
 } from 'lucide-react';
 import { useCampusStore } from '../store/campusStore';
 import { checkAvailability, TimeSlot } from '../engine/conflict';
 import { calculatePriorityScore } from '../engine/waitlist';
+import { dataSource } from '../api';
+import { ScheduleSuggestion } from '../types';
 
 export const EquipmentModal: React.FC = () => {
   const isModalOpen = useCampusStore((s) => s.isModalOpen);
@@ -26,6 +31,8 @@ export const EquipmentModal: React.FC = () => {
   const currentUser = useCampusStore((s) => s.currentUser);
   const createBooking = useCampusStore((s) => s.createBooking);
   const joinWaitlist = useCampusStore((s) => s.joinWaitlist);
+  const selectUnit = useCampusStore((s) => s.selectUnit);
+  const addToast = useCampusStore((s) => s.addToast);
 
   // Booking slide-in panel state
   const [isBookingOpen, setIsBookingOpen] = useState(false);
@@ -39,10 +46,20 @@ export const EquipmentModal: React.FC = () => {
   const [isWaitlistPromptOpen, setIsWaitlistPromptOpen] = useState(false);
   const [waitlistUrgency, setWaitlistUrgency] = useState<'low' | 'medium' | 'high'>('high');
 
+  // AI Smart Scheduling state
+  const [aiPrompt, setAiPrompt] = useState<string>('');
+  const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiSuggestions, setAiSuggestions] = useState<ScheduleSuggestion[]>([]);
+  const [isAiOpen, setIsAiOpen] = useState<boolean>(false);
+
   // Reset booking panel when selected unit changes
   useEffect(() => {
     setIsBookingOpen(false);
     setIsWaitlistPromptOpen(false);
+    setAiSuggestions([]);
+    setAiError(null);
+    setIsAiOpen(false);
   }, [selectedUnitId]);
 
   // Close on Esc key
@@ -144,6 +161,71 @@ export const EquipmentModal: React.FC = () => {
     setEndHourStr(`${eH}:${eM}`);
   };
 
+  const handleAiSchedule = async () => {
+    if (!aiPrompt.trim()) return;
+    setIsAiLoading(true);
+    setAiError(null);
+    setAiSuggestions([]);
+    try {
+      // 1. NLP Parse query (Claude API / strict schema + fallback)
+      const parsed = await dataSource.parseNaturalLanguageSchedule(aiPrompt.trim());
+
+      // Strict validation of parsed output
+      if (!parsed.equipmentType || !parsed.durationMinutes || !parsed.earliest || !parsed.latest) {
+        throw new Error('AI could not parse valid scheduling boundaries. Try clarifying your request.');
+      }
+
+      // 2. Optimization query using OR-Tools CP-SAT batch scheduler
+      const suggestions = await dataSource.suggestSchedule({
+        equipmentType: parsed.equipmentType || unit.type,
+        durationMinutes: parsed.durationMinutes,
+        startWindow: parsed.earliest,
+        endWindow: parsed.latest,
+        userRole: currentUser.role,
+        urgency: 'high',
+        userId: currentUser.id,
+      });
+
+      if (!suggestions || suggestions.length === 0) {
+        setAiError('Zero clash-free slots found in that window. Try expanding your search timeframe.');
+      } else {
+        setAiSuggestions(suggestions);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setAiError(err?.message || 'Failed to generate AI schedule recommendations.');
+    } finally {
+      setIsAiLoading(false);
+    }
+  };
+
+  const handleApplyAiSuggestion = (suggestion: ScheduleSuggestion) => {
+    if (suggestion.unitId !== unit.id) {
+      selectUnit(suggestion.unitId);
+    }
+
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const targetDay = new Date(suggestion.startTime);
+    targetDay.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((targetDay.getTime() - today.getTime()) / (24 * 60 * 60 * 1000));
+    setSelectedDayOffset(Math.max(0, diffDays));
+
+    const sH = suggestion.startTime.getHours().toString().padStart(2, '0');
+    const sM = suggestion.startTime.getMinutes().toString().padStart(2, '0');
+    const eH = suggestion.endTime.getHours().toString().padStart(2, '0');
+    const eM = suggestion.endTime.getMinutes().toString().padStart(2, '0');
+    setStartHourStr(`${sH}:${sM}`);
+    setEndHourStr(`${eH}:${eM}`);
+
+    addToast({
+      type: 'success',
+      title: 'AI Slot Loaded',
+      message: `Populated ${sH}:${sM} - ${eH}:${eM} (${suggestion.unitNumber}). Review details and click Confirm Reservation.`,
+      duration: 4000,
+    });
+  };
+
   const priorityPreview = calculatePriorityScore(
     currentUser.role,
     waitlistUrgency,
@@ -155,7 +237,7 @@ export const EquipmentModal: React.FC = () => {
       className="absolute top-24 right-6 md:right-16 z-50 w-84 md:w-[410px] select-none pointer-events-auto transition-all duration-300 animate-in fade-in zoom-in-95"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="glass-panel-highlight rounded-xl p-5 border border-cyan-500/40 shadow-[0_16px_50px_rgba(0,0,0,0.7)] backdrop-blur-xl">
+      <div className="glass-panel-highlight rounded-xl p-5 border border-cyan-500/40 shadow-[0_16px_50px_rgba(0,0,0,0.7)] backdrop-blur-xl max-h-[85vh] overflow-y-auto">
         {/* Top Header Row */}
         <div className="flex items-center justify-between pb-2 mb-3 border-b border-cyan-500/15">
           <span className="text-xs font-mono text-slate-400 tracking-wider">
@@ -277,6 +359,145 @@ export const EquipmentModal: React.FC = () => {
               >
                 Back
               </button>
+            </div>
+
+            {/* AI Smart Scheduling Assistant (Claude NLP + OR-Tools CP-SAT) */}
+            <div className="mb-3.5 rounded-lg border border-cyan-500/30 bg-slate-950/60 p-2.5 shadow-[0_0_15px_rgba(6,182,212,0.1)]">
+              <div
+                className="flex items-center justify-between cursor-pointer select-none"
+                onClick={() => setIsAiOpen((prev) => !prev)}
+              >
+                <div className="flex items-center space-x-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-cyan-400 animate-pulse" />
+                  <span className="font-semibold text-[11px] text-cyan-300">
+                    AI Smart Slot Assistant
+                  </span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded bg-cyan-950 border border-cyan-500/40 text-cyan-400 font-mono">
+                    Claude + CP-SAT
+                  </span>
+                </div>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 text-slate-400 transition-transform duration-200 ${
+                    isAiOpen ? 'rotate-180 text-cyan-400' : ''
+                  }`}
+                />
+              </div>
+
+              {isAiOpen && (
+                <div className="mt-2.5 pt-2 border-t border-slate-800 space-y-2 animate-in fade-in">
+                  <div className="flex items-center space-x-1.5">
+                    <input
+                      type="text"
+                      value={aiPrompt}
+                      onChange={(e) => setAiPrompt(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleAiSchedule();
+                        }
+                      }}
+                      placeholder='e.g. "I need a GPU for 3 hours on Friday afternoon"'
+                      className="flex-1 bg-slate-900 border border-slate-700 rounded px-2.5 py-1 text-slate-100 text-[11px] placeholder:text-slate-500 focus:border-cyan-400 outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAiSchedule}
+                      disabled={isAiLoading || !aiPrompt.trim()}
+                      className={`px-2.5 py-1 rounded text-[11px] font-semibold flex items-center space-x-1 transition cursor-pointer ${
+                        isAiLoading || !aiPrompt.trim()
+                          ? 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-700/50'
+                          : 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-[0_0_10px_rgba(0,240,255,0.3)]'
+                      }`}
+                    >
+                      {isAiLoading ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Wand2 className="w-3 h-3" />
+                      )}
+                      <span>{isAiLoading ? 'Solving...' : 'Suggest'}</span>
+                    </button>
+                  </div>
+
+                  {/* Quick Prompts */}
+                  <div className="flex flex-wrap gap-1">
+                    {[
+                      '2 hours tomorrow afternoon',
+                      '3 hours Friday morning',
+                      '1 hour today evening',
+                    ].map((quick) => (
+                      <button
+                        key={quick}
+                        type="button"
+                        onClick={() => {
+                          setAiPrompt(quick);
+                        }}
+                        className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-slate-900 border border-slate-700/80 text-slate-400 hover:text-cyan-300 hover:border-cyan-500/50 transition cursor-pointer"
+                      >
+                        "{quick}"
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Error notification */}
+                  {aiError && (
+                    <div className="p-1.5 rounded bg-rose-950/40 border border-rose-500/30 text-rose-300 text-[10px] flex items-center space-x-1">
+                      <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
+                      <span>{aiError}</span>
+                    </div>
+                  )}
+
+                  {/* Top 3 Suggested Slots */}
+                  {aiSuggestions.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      <span className="text-[10px] font-mono text-cyan-400 block font-semibold">
+                        Top 3 Optimal Slots (Ranked by OR-Tools):
+                      </span>
+                      {aiSuggestions.map((sug, idx) => {
+                        const sTime = sug.startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        const eTime = sug.endTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                        const dateStr = sug.startTime.toLocaleDateString([], { weekday: 'short', month: 'numeric', day: 'numeric' });
+
+                        return (
+                          <div
+                            key={idx}
+                            className="p-2 rounded bg-slate-900/90 border border-cyan-500/25 hover:border-cyan-400/60 transition flex flex-col space-y-1"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center space-x-1.5">
+                                <span className="text-[10px] font-bold text-white">
+                                  {dateStr} {sTime} - {eTime}
+                                </span>
+                                <span className="text-[9px] font-mono px-1 rounded bg-slate-800 text-slate-300">
+                                  {sug.unitNumber}
+                                </span>
+                              </div>
+                              <span className="text-[10px] font-mono font-bold text-emerald-400">
+                                Score {Math.round(sug.score)}/100
+                              </span>
+                            </div>
+                            <div className="text-[9px] text-slate-400 leading-tight">
+                              {sug.recommendationReason}
+                            </div>
+                            <div className="pt-1 flex items-center justify-between">
+                              <span className="text-[9px] text-slate-400 font-mono">
+                                Demand: <strong className="text-cyan-300">{sug.demandLevel}</strong> · Util: <strong className="text-slate-200">{Math.round(sug.utilizationRate * 100)}%</strong>
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => handleApplyAiSuggestion(sug)}
+                                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-cyan-500 hover:bg-cyan-400 text-slate-950 transition cursor-pointer flex items-center space-x-1"
+                              >
+                                <span>Apply Slot</span>
+                                <ArrowRight className="w-2.5 h-2.5" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Date Selector Chips */}

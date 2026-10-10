@@ -132,3 +132,36 @@ export interface AuditLogEntry {
   timestamp: Date;
   userId: string;
 }
+
+export interface ScheduleSuggestion {
+  unitId: string;
+  unitName: string;
+  unitNumber: string;
+  buildingId: string;
+  buildingName: string;
+  startTime: Date;
+  endTime: Date;
+  durationMinutes: number;
+  score: number;
+  utilizationRate: number;
+  demandLevel: string;
+  recommendationReason: string;
+}
+
+export interface ScheduleSuggestParams {
+  equipmentType: string;
+  durationMinutes: number;
+  startWindow?: Date;
+  endWindow?: Date;
+  daysWindow?: number;
+  userRole?: string;
+  urgency?: string;
+  userId?: string;
+}
+
+export interface ParsedScheduleIntent {
+  equipmentType: string;
+  durationMinutes: number;
+  earliest: Date;
+  latest: Date;
+}
